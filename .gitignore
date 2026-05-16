@@ -19,6 +19,8 @@ vitis_hls_project/**/*.zip
 .cache/
 __pycache__/
 *.pyc
+*.log
+*.jou
 
 # Generated data can be recreated
 tests/data/*.bin
