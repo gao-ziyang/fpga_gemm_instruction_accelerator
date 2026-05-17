@@ -1,14 +1,14 @@
-# 迭代日志 002：扩展到 4x4 tile GEMM
+# 迭代日志 002：从固定 4x4 扩展到 tiled GEMM
 
-## 本次迭代目标
+## 我这一版想解决什么
 
-在 001 的最小 `4x4 GEMM` 基础上，将计算扩展为运行时传入规模的 tiled GEMM：
+上一版只能算固定 `4x4`，这一版我想让 GEMM 至少能支持运行时传入：
 
 ```text
 C[N,M] = A[N,K] x B[K,M]
 ```
 
-本次设置：
+当前测试先用：
 
 ```text
 GEMM_MAX_N = 8
@@ -20,11 +20,22 @@ K = 8
 M = 8
 ```
 
-本次只做 tile 拆分和 K 维分块累加，不引入片上 A/B buffer，不处理非整除边界，也不做右移量化。
+这样可以先理解“大矩阵拆成多个 4x4 tile”这件事。
 
-## 为什么这么做
+## 我改了哪些地方
 
-老师要求的 GEMM 核不可能只停留在固定 `4x4`。后续 CNN 卷积和 Transformer 中的 `Q/K/V projection`、`QK^T`、`S x V` 都需要不同的 `N/K/M`。因此第二步要把最小 tile 扩展成：
+| 文件 | 改动 |
+| --- | --- |
+| `hls/src/gemm_types.h` | 从固定 `GEMM_DIM=4` 改成 `GEMM_MAX_N/K/M=8` 和 `GEMM_TILE=4`。 |
+| `hls/src/gemm_core.h` | 接口改成 `gemm_tiled(A,B,C,N,K,M)`。 |
+| `hls/src/gemm_core.cpp` | 增加 `i0/j0/k0` 三层 tile 循环。 |
+| `hls/src/gemm_top.cpp` | 顶层增加 `N/K/M` 参数。 |
+| `hls/tb/tb_gemm.cpp` | 测试从 `4x4` 改成 `8x8x8`。 |
+| `python/golden/gemm_4x4_baseline.py` | Python baseline 同步改成 tiled GEMM case。 |
+
+## 我学到的东西
+
+这一版我第一次把 GEMM 写成 tile 形式：
 
 ```text
 for i0 in N step 4:
@@ -35,25 +46,19 @@ for i0 in N step 4:
     C_tile = localC
 ```
 
-这一步的重点是理解：
+这里我比较容易出错的地方是：`localC` 不能在每个 `k0` 分块里重新清零。它必须跨多个 K tile 累加，最后才写回 C。
 
-1. `C` 被拆成多个 `4x4` 输出 tile。
-2. 每个输出 tile 沿 K 维分块累加。
-3. `localC` 必须跨多个 K tile 累加，不能每次 K 分块都写回覆盖。
+这也让我开始意识到，GEMM 不是简单三重循环，后面真正难的地方会变成：
 
-## 本次改动
+```text
+数据从哪里读；
+读几次；
+能不能复用；
+读端口够不够；
+并行计算能不能喂饱。
+```
 
-| 文件 | 改动 |
-| --- | --- |
-| `hls/src/gemm_types.h` | 将固定 `GEMM_DIM=4` 扩展为 `GEMM_MAX_N/K/M=8` 和 `GEMM_TILE=4`。 |
-| `hls/src/gemm_core.h` | 将 `gemm_4x4` 接口替换为 `gemm_tiled(A, B, C, N, K, M)`。 |
-| `hls/src/gemm_core.cpp` | 实现 `i0/j0/k0` 三层 tile 循环和 `localC` 分块累加。 |
-| `hls/src/gemm_top.cpp` | 顶层增加运行时参数 `N/K/M`。 |
-| `hls/tb/tb_gemm.cpp` | 测试规模改为 `8x8x8`，增加 `mismatch_count`、`max_abs_error`、`checksum`。 |
-| `python/golden/gemm_4x4_baseline.py` | baseline 改为 `8x8x8` GEMM。 |
-| `hls/scripts/run_hls_gemm.tcl` | 使用 `open_project -reset` 和 `open_solution -reset`，避免重复添加文件导致综合失败。 |
-
-## 验证方式
+## 验证过程
 
 ### Python baseline
 
@@ -81,12 +86,6 @@ python3 python/golden/gemm_4x4_baseline.py
 
 ### HLS C simulation
 
-命令：
-
-```bat
-C:\xilinx\Vitis_HLS\2020.2\bin\vitis_hls.bat -f C:\Transformer\gzy_gemm_accel\hls\scripts\run_hls_gemm.tcl
-```
-
 关键输出：
 
 ```text
@@ -99,7 +98,7 @@ INFO: [SIM 211-1] CSim done with 0 errors.
 
 ### HLS C synthesis
 
-本次综合通过，但出现一个重要现象：
+这一版综合能通过，但是报告里出现了一个很重要的问题：
 
 ```text
 WARNING: Unable to schedule 'load' operation on array 'B' due to limited memory ports.
@@ -108,9 +107,8 @@ Pipelining result : Target II = 1, Final II = 2, loop 'tile_k_loop_dot_k'
 **** Estimated Fmax: 146.48 MHz
 ```
 
-## 本次结果分析
+## 这一版的问题和后续想法
 
-这次的数学结果正确，但调度结果暴露了访存瓶颈：`dot_k` 里要并行读多个 `B[k][j]`，而外部数组接口或普通存储端口数量有限，HLS 无法在一个周期内满足所有读请求，所以 `II` 被迫从目标 `1` 放宽到 `2`。
+数学结果是对的，但综合报告提醒我：计算循环里要同时读很多 `B[k][j]`，而普通数组接口或未拆分的存储端口不够，所以 HLS 没办法把目标 `II=1` 调度出来。
 
-这个问题正好引出下一次迭代：把 A/B 先搬到片上 buffer，再把 `localA/localB/localC` 完全 partition，让局部计算不再直接被外部 B 矩阵端口卡住。
-
+我理解这里的问题不是“乘法算不动”，而是“数据供不上”。后面应该尝试先把 A/B 搬到片上 buffer，再把当前 `4x4` tile 搬到完全 partition 的 local buffer 中，让真正计算阶段不要直接受外部数组端口限制。
