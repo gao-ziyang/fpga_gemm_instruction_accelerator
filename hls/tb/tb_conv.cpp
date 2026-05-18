@@ -2,18 +2,33 @@
 
 #include "conv_top.h"
 
-static void init_input(gemm_data_t input[CONV_CIN][CONV_IN_H][CONV_IN_W]) {
+static int input_index(int ci, int h, int w) {
+    return ci * CONV_INPUT_C_STRIDE + h * CONV_INPUT_H_STRIDE + w;
+}
+
+static int weight_index(int co, int ci, int kh, int kw) {
+    return co * CONV_WEIGHT_CO_STRIDE +
+           ci * CONV_WEIGHT_CI_STRIDE +
+           kh * CONV_WEIGHT_KH_STRIDE +
+           kw * CONV_WEIGHT_KW_STRIDE;
+}
+
+static int output_index(int co, int oh, int ow) {
+    return co * CONV_OUTPUT_C_STRIDE + oh * CONV_OUTPUT_H_STRIDE + ow;
+}
+
+static void init_input(gemm_data_t input[CONV_INPUT_SIZE]) {
     for (int ci = 0; ci < CONV_CIN; ci++) {
         for (int h = 0; h < CONV_IN_H; h++) {
             for (int w = 0; w < CONV_IN_W; w++) {
                 int v = ((ci * 41 + h * 17 + w * 29 + 11) % 96) - 48;
-                input[ci][h][w] = (gemm_data_t)v;
+                input[input_index(ci, h, w)] = (gemm_data_t)v;
             }
         }
     }
 }
 
-static void init_weight(gemm_data_t weight[CONV_COUT][CONV_CIN][CONV_KH][CONV_KW]) {
+static void init_weight(gemm_data_t weight[CONV_WEIGHT_SIZE]) {
     for (int co = 0; co < CONV_COUT; co++) {
         for (int ci = 0; ci < CONV_CIN; ci++) {
             for (int kh = 0; kh < CONV_KH; kh++) {
@@ -22,7 +37,7 @@ static void init_weight(gemm_data_t weight[CONV_COUT][CONV_CIN][CONV_KH][CONV_KW
                     if (((co + ci + kh + kw) & 1) != 0) {
                         v = -v;
                     }
-                    weight[co][ci][kh][kw] = (gemm_data_t)v;
+                    weight[weight_index(co, ci, kh, kw)] = (gemm_data_t)v;
                 }
             }
         }
@@ -30,7 +45,7 @@ static void init_weight(gemm_data_t weight[CONV_COUT][CONV_CIN][CONV_KH][CONV_KW
 }
 
 static void build_im2col_matrix(
-    gemm_data_t input[CONV_CIN][CONV_IN_H][CONV_IN_W],
+    gemm_data_t input[CONV_INPUT_SIZE],
     gemm_data_t A[CONV_GEMM_N][CONV_GEMM_K]
 ) {
     for (int oh = 0; oh < CONV_OUT_H; oh++) {
@@ -42,7 +57,7 @@ static void build_im2col_matrix(
                     for (int kw = 0; kw < CONV_KW; kw++) {
                         const int ih = oh * CONV_STRIDE + kh;
                         const int iw = ow * CONV_STRIDE + kw;
-                        A[row][col] = input[ci][ih][iw];
+                        A[row][col] = input[input_index(ci, ih, iw)];
                         col++;
                     }
                 }
@@ -52,7 +67,7 @@ static void build_im2col_matrix(
 }
 
 static void build_weight_matrix(
-    gemm_data_t weight[CONV_COUT][CONV_CIN][CONV_KH][CONV_KW],
+    gemm_data_t weight[CONV_WEIGHT_SIZE],
     gemm_data_t B[CONV_GEMM_K][CONV_GEMM_M]
 ) {
     for (int co = 0; co < CONV_COUT; co++) {
@@ -60,7 +75,7 @@ static void build_weight_matrix(
         for (int ci = 0; ci < CONV_CIN; ci++) {
             for (int kh = 0; kh < CONV_KH; kh++) {
                 for (int kw = 0; kw < CONV_KW; kw++) {
-                    B[row][co] = weight[co][ci][kh][kw];
+                    B[row][co] = weight[weight_index(co, ci, kh, kw)];
                     row++;
                 }
             }
@@ -85,9 +100,9 @@ static void build_gemm_matrix_reference(
 }
 
 static void conv2d_reference(
-    gemm_data_t input[CONV_CIN][CONV_IN_H][CONV_IN_W],
-    gemm_data_t weight[CONV_COUT][CONV_CIN][CONV_KH][CONV_KW],
-    gemm_acc_t expected[CONV_COUT][CONV_OUT_H][CONV_OUT_W]
+    gemm_data_t input[CONV_INPUT_SIZE],
+    gemm_data_t weight[CONV_WEIGHT_SIZE],
+    gemm_acc_t expected[CONV_OUTPUT_SIZE]
 ) {
     for (int co = 0; co < CONV_COUT; co++) {
         for (int oh = 0; oh < CONV_OUT_H; oh++) {
@@ -98,36 +113,36 @@ static void conv2d_reference(
                         for (int kw = 0; kw < CONV_KW; kw++) {
                             const int ih = oh * CONV_STRIDE + kh;
                             const int iw = ow * CONV_STRIDE + kw;
-                            raw_sum += (gemm_acc_t)input[ci][ih][iw] *
-                                       (gemm_acc_t)weight[co][ci][kh][kw];
+                            raw_sum += (gemm_acc_t)input[input_index(ci, ih, iw)] *
+                                       (gemm_acc_t)weight[weight_index(co, ci, kh, kw)];
                         }
                     }
                 }
-                expected[co][oh][ow] = raw_sum;
+                expected[output_index(co, oh, ow)] = raw_sum;
             }
         }
     }
 }
 
-static void print_input(gemm_data_t input[CONV_CIN][CONV_IN_H][CONV_IN_W]) {
+static void print_input(gemm_data_t input[CONV_INPUT_SIZE]) {
     for (int ci = 0; ci < CONV_CIN; ci++) {
         std::printf("[TB] input[%d]:\n", ci);
         for (int h = 0; h < CONV_IN_H; h++) {
             for (int w = 0; w < CONV_IN_W; w++) {
-                std::printf("%8d", (int)input[ci][h][w]);
+                std::printf("%8d", (int)input[input_index(ci, h, w)]);
             }
             std::printf("\n");
         }
     }
 }
 
-static void print_weight(gemm_data_t weight[CONV_COUT][CONV_CIN][CONV_KH][CONV_KW]) {
+static void print_weight(gemm_data_t weight[CONV_WEIGHT_SIZE]) {
     for (int co = 0; co < CONV_COUT; co++) {
         for (int ci = 0; ci < CONV_CIN; ci++) {
             std::printf("[TB] weight[%d][%d]:\n", co, ci);
             for (int kh = 0; kh < CONV_KH; kh++) {
                 for (int kw = 0; kw < CONV_KW; kw++) {
-                    std::printf("%8d", (int)weight[co][ci][kh][kw]);
+                    std::printf("%8d", (int)weight[weight_index(co, ci, kh, kw)]);
                 }
                 std::printf("\n");
             }
@@ -155,13 +170,13 @@ static void print_matrix_acc(const char* name, gemm_acc_t* data, int rows, int c
     }
 }
 
-static void print_output(const char* name, gemm_acc_t data[CONV_COUT][CONV_OUT_H][CONV_OUT_W]) {
+static void print_output(const char* name, gemm_acc_t data[CONV_OUTPUT_SIZE]) {
     std::printf("%s\n", name);
     for (int co = 0; co < CONV_COUT; co++) {
         std::printf("  channel %d:\n", co);
         for (int oh = 0; oh < CONV_OUT_H; oh++) {
             for (int ow = 0; ow < CONV_OUT_W; ow++) {
-                std::printf("%8d", (int)data[co][oh][ow]);
+                std::printf("%8d", (int)data[output_index(co, oh, ow)]);
             }
             std::printf("\n");
         }
@@ -170,24 +185,26 @@ static void print_output(const char* name, gemm_acc_t data[CONV_COUT][CONV_OUT_H
 
 int main() {
     std::printf(
-        "[TB] Conv shape: input[%d,%d,%d], weight[%d,%d,%d,%d], GEMM A[%d,%d] x B[%d,%d]\n",
+        "[TB] Conv shape: input[%d,%d,%d] flat[%d], weight[%d,%d,%d,%d] flat[%d], GEMM A[%d,%d] x B[%d,%d]\n",
         CONV_CIN,
         CONV_IN_H,
         CONV_IN_W,
+        CONV_INPUT_SIZE,
         CONV_COUT,
         CONV_CIN,
         CONV_KH,
         CONV_KW,
+        CONV_WEIGHT_SIZE,
         CONV_GEMM_N,
         CONV_GEMM_K,
         CONV_GEMM_K,
         CONV_GEMM_M
     );
 
-    gemm_data_t input[CONV_CIN][CONV_IN_H][CONV_IN_W] = {0};
-    gemm_data_t weight[CONV_COUT][CONV_CIN][CONV_KH][CONV_KW] = {0};
-    gemm_acc_t output[CONV_COUT][CONV_OUT_H][CONV_OUT_W] = {0};
-    gemm_acc_t expected[CONV_COUT][CONV_OUT_H][CONV_OUT_W] = {0};
+    gemm_data_t input[CONV_INPUT_SIZE] = {0};
+    gemm_data_t weight[CONV_WEIGHT_SIZE] = {0};
+    gemm_acc_t output[CONV_OUTPUT_SIZE] = {0};
+    gemm_acc_t expected[CONV_OUTPUT_SIZE] = {0};
     gemm_data_t A_ref[CONV_GEMM_N][CONV_GEMM_K] = {0};
     gemm_data_t B_ref[CONV_GEMM_K][CONV_GEMM_M] = {0};
     gemm_acc_t C_ref[CONV_GEMM_N][CONV_GEMM_M] = {0};
@@ -216,14 +233,15 @@ int main() {
     for (int co = 0; co < CONV_COUT; co++) {
         for (int oh = 0; oh < CONV_OUT_H; oh++) {
             for (int ow = 0; ow < CONV_OUT_W; ow++) {
-                const int got = (int)output[co][oh][ow];
-                const int ref = (int)expected[co][oh][ow];
+                const int idx = output_index(co, oh, ow);
+                const int got = (int)output[idx];
+                const int ref = (int)expected[idx];
                 const int diff = got - ref;
                 const int abs_diff = diff < 0 ? -diff : diff;
                 if (abs_diff > max_abs_error) {
                     max_abs_error = abs_diff;
                 }
-                checksum += (long long)got * (long long)(co * CONV_OUT_H * CONV_OUT_W + oh * CONV_OUT_W + ow + 1);
+                checksum += (long long)got * (long long)(idx + 1);
                 if (got != ref) {
                     std::printf(
                         "[ERR] output[%d][%d][%d] got %d, expected %d\n",

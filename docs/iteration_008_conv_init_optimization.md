@@ -57,7 +57,10 @@ reshape
 
 | 文件 | 改动 |
 | --- | --- |
-| `hls/src/conv_core.cpp` | 删除 `A/B/C` 的 full-matrix 清零循环。 |
+| `hls/src/conv_core.cpp` | 删除 `A/B/C` 的 full-matrix 清零循环；后来又改成 1D flat 输入输出和自增地址。 |
+| `hls/src/conv_types.h` | 增加 input/weight/output 的 flat size 和 stride 常量。 |
+| `hls/src/conv_core.h` / `hls/src/conv_top.h` / `hls/src/conv_top.cpp` | Conv 外部接口从多维数组改成 1D flat 数组。 |
+| `hls/tb/tb_conv.cpp` | testbench 也改成 flat input/weight/output，并保留多维打印和 golden reference。 |
 | `README_conv.md` | 补充 Conv 初始化优化说明和最新验证结果。 |
 | `README.md` | 更新 `conv_top` 的综合和 cosim 摘要。 |
 | `docs/iteration_008_conv_init_optimization.md` | 记录这次定位和优化过程。 |
@@ -71,6 +74,74 @@ static gemm_acc_t C[GEMM_MAX_N][GEMM_MAX_M];
 ```
 
 这是因为 `gemm_tiled()` 的接口需要固定最大数组形状。当前优化先不改 GEMM 接口，只去掉明显无效的运行时清零。
+
+## 问题 2：地址逻辑把 LUT/FF/DSP 拉得太高
+
+删掉初始化以后，Conv latency 从 `15448 cycles` 降到了 `3154 cycles`，但资源还是很吓人：
+
+```text
+DSP = 36
+FF  = 47329
+LUT = 37207
+```
+
+这里尤其奇怪的是 DSP。我的 GEMM 微核是 4x4 MAC，理论上主要应该是 16 个 DSP，但 Conv top 里多出来了 20 个 DSP。我把这个现象问了 AI，也结合 HLS 日志重新看了一下，暂时理解是：问题主要来自多维数组、强行流水和循环拍平、非 2 的幂维度，以及复杂外围地址计算。特别是 `3x3x3=27` 这种维度被 HLS 拍平成流水线以后，硬件为了从一个线性 counter 反解 `ci/kh/kw`，容易生成 `urem/div`；另外多维地址表达式也可能被综合成额外乘法器。
+
+之前综合日志里确实出现过类似这些模块：
+
+```text
+mul_64ns_66ns_129_5_1
+urem_61ns_3ns_61_65_1
+urem_62ns_4ns_62_66_1
+urem_63ns_3ns_2_67_1
+urem_64s_3ns_2_68_1
+urem_64s_4ns_3_68_1
+```
+
+所以我这一版继续改 Conv wrapper，而不是动 GEMM core。
+
+## 1D flatten + 增量寻址
+
+我把 Conv 的外部接口从多维数组改成 1D：
+
+```text
+input[CONV_CIN][CONV_IN_H][CONV_IN_W]
+  -> input[108]
+
+weight[CONV_COUT][CONV_CIN][CONV_KH][CONV_KW]
+  -> weight[108]
+
+output[CONV_COUT][CONV_OUT_H][CONV_OUT_W]
+  -> output[64]
+```
+
+只改成 1D 还不够。如果代码里继续大量写：
+
+```cpp
+ci * stride + kh * stride + kw
+```
+
+HLS 还是可能生成复杂地址逻辑。所以我同时把核心搬运逻辑改成自增地址：
+
+```text
+input_ptr  按窗口位置自增
+weight_ptr 按 kernel layout 自增
+output_ptr 按输出 layout 自增
+```
+
+为了不让代码完全变成一堆魔数，我在 `conv_types.h` 里补了 stride 常量：
+
+```cpp
+CONV_INPUT_C_STRIDE
+CONV_INPUT_H_STRIDE
+CONV_WEIGHT_CO_STRIDE
+CONV_WEIGHT_CI_STRIDE
+CONV_WEIGHT_KH_STRIDE
+CONV_OUTPUT_C_STRIDE
+CONV_OUTPUT_H_STRIDE
+```
+
+同时在 `conv_core.cpp` 的 im2col 和 weight flatten 上方保留原来的多维数学布局注释。这个版本可读性确实比多维数组差一点，但换来的资源下降非常明显。
 
 ## 验证过程
 
@@ -93,7 +164,7 @@ cosim_design -rtl verilog
 C-sim 仍然通过：
 
 ```text
-[TB] Conv shape: input[3,6,6], weight[4,3,3,3], GEMM A[16,27] x B[27,4]
+[TB] Conv shape: input[3,6,6] flat[108], weight[4,3,3,3] flat[108], GEMM A[16,27] x B[27,4]
 [TB] mismatch_count=0
 [TB] max_abs_error=0
 [TB] checksum=-72952
@@ -109,7 +180,7 @@ INFO: [COSIM 212-1000] *** C/RTL co-simulation finished: PASS ***
 cosim 报告：
 
 ```text
-|   Verilog|      Pass|           3154|           3154|           3154|
+|   Verilog|      Pass|           2594|           2594|           2594|
 ```
 
 ## 综合结果对比
@@ -118,10 +189,13 @@ cosim 报告：
 | --- | --- | --- | --- | --- | --- | --- |
 | 删除初始化前 | 15 | 36 | 47464 | 37641 | 7.272 ns | 15448 cycles |
 | 删除初始化后 | 15 | 36 | 47329 | 37207 | 7.272 ns | 3154 cycles |
+| 1D flatten + 自增地址后 | 15 | 16 | 1894 | 3574 | 7.103 ns | 2594 cycles |
 
-这次最明显的变化是 latency，从 `15448 cycles` 降到 `3154 cycles`，少了 `12294 cycles`。BRAM 和 DSP 没变，因为数组和 GEMM 微核结构没有变；FF/LUT 小幅下降，是因为少了一些初始化控制和相关逻辑。
+第一步删初始化，主要降低 latency；第二步 1D flatten + 自增地址，主要降低 LUT/FF/DSP。BRAM 仍然是 15，没有变化，因为 `A/B/C` 和 GEMM 内部 buffer 的存储结构还没改。
 
-我觉得这个结果挺有帮助：有时候资源没有明显变少，但 latency 会因为少扫了很多无用存储空间而大幅下降。
+我重新查生成 RTL 后，没有再看到之前那串 `urem_*` 和额外 `mul_64ns_*` 模块。现在 `conv_top` 的 DSP 数量回到 16，基本就是 GEMM 4x4 MAC 阵列本身。
+
+我觉得这个结果挺有帮助：有时候资源没有明显变少，但 latency 会因为少扫了很多无用存储空间而大幅下降；而 LUT/FF/DSP 爆炸时，则要怀疑地址计算、循环拍平和非 2 的幂维度。
 
 ## 我学到的东西
 
@@ -130,10 +204,12 @@ cosim 报告：
 1. HLS 里 `static` 大数组保留的是硬件存储结构，不代表每次函数运行都必须把所有元素清一遍。
 2. `GEMM_MAX_N/K/M` 是综合时的最大容量，实际调用的 `N/K/M` 才决定 active 计算区域。
 3. 优化前要先看数据流，确认哪些数组元素真的会被读。盲目初始化最大数组虽然看起来稳，但可能会让 latency 非常难看。
+4. HLS 里多维数组本身不是唯一问题，真正危险的是多维寻址、非 2 的幂循环、自动 loop flatten 和 pipeline 叠在一起，可能生成很重的 `urem/div/mul` 地址逻辑。
+5. 1D flatten 会降低代码可读性，所以必须配合 stride 常量和布局注释，不然很容易把地址写错。
 
 ## 这一版的问题和后续想法
 
-当前优化还只是删掉了明显的死开销。`conv2d_gemm()` 里仍然有最大尺寸的 `A/B/C` 中间矩阵，这会让资源看起来不小。后续如果继续优化 Conv，我觉得可以考虑：
+当前优化已经把 Conv 外围地址逻辑压下来了，但 `conv2d_gemm()` 里仍然有最大尺寸的 `A/B/C` 中间矩阵。后续如果继续优化 Conv，我觉得可以考虑：
 
 ```text
 1. 只为 Conv active shape 准备更小的局部 A/B/C buffer。

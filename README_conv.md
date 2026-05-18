@@ -87,14 +87,24 @@ C[16,4]
 
 因此当前版本删除了 Conv wrapper 里的 full-matrix 初始化，只保留真正需要的 im2col、weight flatten、GEMM 和 reshape。删除后 C-sim 和 C/RTL cosim 仍然逐元素一致。
 
+随后我又把 `conv_top()` 的外部数组接口改成 1D flatten：
+
+```text
+input:  [3][6][6]       -> input[108]
+weight: [4][3][3][3]    -> weight[108]
+output: [4][4][4]       -> output[64]
+```
+
+同时在 `conv2d_gemm()` 里用 `input_ptr`、`weight_ptr`、`output_ptr` 这类自增地址代替多维公式寻址。这样可读性会差一点，所以我在 `conv_types.h` 里保留了 stride 常量，并在代码注释里保留原来的多维数学布局。这样做的收益是减少 HLS 为非 2 的幂维度和拍平循环生成的 `urem/div/mul` 地址逻辑。
+
 ## 文件说明
 
 | 文件 | 作用 |
 | --- | --- |
-| `hls/src/conv_types.h` | 固定 Conv2D 参数和 GEMM 映射尺寸。 |
-| `hls/src/conv_core.h/.cpp` | `conv2d_gemm()`，实现 im2col、weight flatten、GEMM 和 output reshape。 |
-| `hls/src/conv_top.h/.cpp` | HLS 单元验证 top。 |
-| `hls/tb/tb_conv.cpp` | direct convolution golden，对比 `conv_top()` 输出。 |
+| `hls/src/conv_types.h` | 固定 Conv2D 参数、flat size、stride 和 GEMM 映射尺寸。 |
+| `hls/src/conv_core.h/.cpp` | `conv2d_gemm()`，用 1D input/weight/output 完成 im2col、weight flatten、GEMM 和 output reshape。 |
+| `hls/src/conv_top.h/.cpp` | HLS 单元验证 top，接口为 flat `ap_memory` 数组。 |
+| `hls/tb/tb_conv.cpp` | flat 输入输出的 direct convolution golden，对比 `conv_top()` 输出。 |
 | `hls/scripts/run_hls_conv.tcl` | 自动运行 C-sim、C-synth、C/RTL cosim。 |
 
 ## 如何运行
@@ -108,7 +118,7 @@ C:\xilinx\Vitis_HLS\2020.2\bin\vitis_hls.bat -f C:\Transformer\gzy_gemm_accel\hl
 C-sim 关键输出：
 
 ```text
-[TB] Conv shape: input[3,6,6], weight[4,3,3,3], GEMM A[16,27] x B[27,4]
+[TB] Conv shape: input[3,6,6] flat[108], weight[4,3,3,3] flat[108], GEMM A[16,27] x B[27,4]
 [TB] mismatch_count=0
 [TB] max_abs_error=0
 [TB] checksum=-72952
@@ -119,16 +129,16 @@ C/RTL cosim：
 
 ```text
 Verilog: PASS
-Latency: 3154 cycles
+Latency: 2594 cycles
 ```
 
 C-synthesis 摘要：
 
 | Top | BRAM_18K | DSP | FF | LUT | Estimated clock | Latency |
 | --- | --- | --- | --- | --- | --- | --- |
-| `conv_top` | 15 | 36 | 47329 | 37207 | 7.272 ns | 3154 cycles |
+| `conv_top` | 15 | 16 | 1894 | 3574 | 7.103 ns | 2594 cycles |
 
-和上一版 full-matrix 初始化相比，RTL latency 从 `15448 cycles` 降到 `3154 cycles`，主要原因是删除了对未使用最大矩阵区域的运行时清零。
+和最初 full-matrix 初始化版本相比，RTL latency 从 `15448 cycles` 降到 `2594 cycles`。和只删除初始化的版本相比，1D flatten + 增量寻址主要把 `DSP 36 -> 16`、`LUT 37207 -> 3574`、`FF 47329 -> 1894`，说明原先很大一部分资源确实花在 Conv 外围地址逻辑上。
 
 ## 当前限制
 

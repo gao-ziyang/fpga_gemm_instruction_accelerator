@@ -169,7 +169,7 @@ cosim_design -rtl verilog
 | Top | BRAM_18K | DSP | FF | LUT | Estimated clock | RTL latency |
 | --- | --- | --- | --- | --- | --- | --- |
 | `gemm_top` | 2 | 16 | 3914 | 5226 | 7.142 ns | 544 cycles |
-| `conv_top` | 15 | 36 | 47329 | 37207 | 7.272 ns | 3154 cycles |
+| `conv_top` | 15 | 16 | 1894 | 3574 | 7.103 ns | 2594 cycles |
 | `qkv_top` | 2 | 16 | 3921 | 5375 | 7.300 ns | 360362 cycles |
 | `attention_score_top` | 10 | 17 | 4517 | 5764 | 7.050 ns | max 23025 cycles |
 | `attention_no_softmax_top` | 37 | 49 | 13135 | 18117 | 7.300 ns | max 407139 cycles |
@@ -177,7 +177,7 @@ cosim_design -rtl verilog
 
 `attention_top` 里 row-normalization 目前使用整数除法，HLS 生成了 `sdiv`，所以它是一个能跑通的第一版近似，不是最终资源优化版本。
 
-Conv2D 这里已经去掉了 wrapper 里对 `A/B/C` 最大矩阵的全量初始化。因为当前层只实际使用 `A[16,27]`、`B[27,4]`、`C[16,4]`，active 区域会被 im2col、weight flatten 和 GEMM 完整覆盖；删除 full-matrix init 后，Conv RTL latency 从 `15448 cycles` 降到 `3154 cycles`，数值验证不变。
+Conv2D 这里已经做了两步优化：先去掉 wrapper 里对 `A/B/C` 最大矩阵的全量初始化，再把 `conv_top()` 外部接口改成 flat `input[108]`、`weight[108]`、`output[64]`，并用自增地址写 im2col/weight flatten/reshape。这样避免 HLS 为多维数组和非 2 的幂循环拍平生成大量 `urem/div/mul` 地址逻辑，Conv RTL latency 从 `15448 cycles` 降到 `2594 cycles`，额外 DSP 也从 36 降回 GEMM 微核本身的 16。
 
 ## 环境
 
