@@ -24,5 +24,6 @@ create_clock -period 10 -name default
 
 csim_design
 csynth_design
+cosim_design -rtl verilog
 
 exit

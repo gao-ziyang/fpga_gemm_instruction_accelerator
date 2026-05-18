@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 
-GEMM_MAX_N = 8
-GEMM_MAX_K = 8
-GEMM_MAX_M = 8
-GEMM_OUT_SHIFT = 8
+GEMM_MAX_N = 16
+GEMM_MAX_K = 96
+GEMM_MAX_M = 96
 
-N = 7
-D = 6
+N = 16
+D = 96
 
 
 def gen_x(i, k):
@@ -43,7 +42,7 @@ def projection_ref(x, w):
             acc = 0
             for k in range(D):
                 acc += x[i][k] * w[k][j]
-            y[i][j] = acc >> GEMM_OUT_SHIFT
+            y[i][j] = acc
     return y
 
 
@@ -60,8 +59,13 @@ def checksum(q, k_mat, v):
 
 def print_matrix(name, mat):
     print(name)
-    for i in range(N):
-        print(" ".join(f"{mat[i][j]:8d}" for j in range(D)))
+    print_rows = min(N, 4)
+    print_cols = min(D, 8)
+    for i in range(print_rows):
+        suffix = " ..." if print_cols < D else ""
+        print(" ".join(f"{mat[i][j]:8d}" for j in range(print_cols)) + suffix)
+    if print_rows < N:
+        print("  ...")
 
 
 def main():
@@ -70,9 +74,9 @@ def main():
     k_mat = projection_ref(x, wk)
     v = projection_ref(x, wv)
 
-    print_matrix("[PY] Q = (X x Wq) >> 8:", q)
-    print_matrix("[PY] K = (X x Wk) >> 8:", k_mat)
-    print_matrix("[PY] V = (X x Wv) >> 8:", v)
+    print_matrix("[PY] Q = X x Wq:", q)
+    print_matrix("[PY] K = X x Wk:", k_mat)
+    print_matrix("[PY] V = X x Wv:", v)
     print(f"[PY] checksum={checksum(q, k_mat, v)}")
 
 

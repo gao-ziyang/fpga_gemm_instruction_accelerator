@@ -10,7 +10,7 @@ void gemm_tiled(
     bool update_A
 ) {
 #pragma HLS INLINE off
-
+    // GEMM_MAX_* is the synthesis-time capacity; N/K/M is the runtime shape.
     static gemm_data_t A_bram[GEMM_MAX_N][GEMM_MAX_K];
     static gemm_data_t B_bram[GEMM_MAX_K][GEMM_BLOCK_M];
 #pragma HLS BIND_STORAGE variable=A_bram type=ram_2p impl=bram
@@ -111,7 +111,7 @@ tile_i_loop:
                         int i_global = i0 + ii;
                         int j_global = j_block + j0 + jj;
                         if (i_global < N && j_global < M) {
-                            C[i_global][j_global] = localC[ii][jj] >> GEMM_OUT_SHIFT;
+                            C[i_global][j_global] = localC[ii][jj];
                         }
                     }
                 }

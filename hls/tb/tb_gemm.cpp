@@ -50,7 +50,7 @@ int main() {
             for (int k = 0; k < K; k++) {
                 sum += (gemm_acc_t)A[i][k] * (gemm_acc_t)B[k][j];
             }
-            golden[i][j] = sum >> GEMM_OUT_SHIFT;
+            golden[i][j] = sum;
         }
     }
 

@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 
-GEMM_MAX_N = 8
-GEMM_MAX_K = 8
-GEMM_MAX_M = 8
-GEMM_OUT_SHIFT = 8
+GEMM_MAX_N = 16
+GEMM_MAX_K = 96
+GEMM_MAX_M = 96
 
 N = 7
 K = 6
@@ -40,7 +39,7 @@ def matmul_ref(a, b):
             acc = 0
             for k in range(K):
                 acc += a[i][k] * b[k][j]
-            c[i][j] = acc >> GEMM_OUT_SHIFT
+            c[i][j] = acc
     return c
 
 
@@ -63,7 +62,7 @@ def main():
     c = matmul_ref(a, b)
     print_matrix("[PY] A:", a, N, K)
     print_matrix("[PY] B:", b, K, M)
-    print_matrix("[PY] C = (A x B) >> 8:", c, N, M)
+    print_matrix("[PY] C = A x B:", c, N, M)
     print(f"[PY] checksum={checksum(c)}")
 
 

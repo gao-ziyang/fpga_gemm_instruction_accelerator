@@ -1,345 +1,207 @@
 # fpga_gemm_instruction_accelerator
 
-这是一个基于 Vitis HLS 的小型 FPGA GEMM / 算子调度学习工程。当前目标不是一开始做完整模型，而是先把老师任务里的关键计算逐步拆开：
+这是我围绕 FPGA GEMM、CNN 卷积映射、Transformer Attention 和后续指令式加速器控制做的 HLS 学习工程。当前做的是量化推理路径，不涉及训练。
+
+我的阶段性路线是：
 
 ```text
 INT8 GEMM 微核
-  -> CNN 卷积层映射
-  -> Transformer Attention / Encoder 子模块
-  -> 64-bit micro-instruction 控制的 accelerator_top
-  -> 后续 PS-PL / DDR / AXI 上板接口
+  -> CNN Conv2D lowering/im2col 到 GEMM
+  -> Transformer QKV / QK^T / P*V
+  -> 最小 micro-instruction + accelerator_top
+  -> 后续再考虑 PS-PL、DDR、AXI、串口调试和上板
 ```
-
-当前工程已经实现并验证了一个小型 `INT8 x INT8 -> INT32 -> >> 8` 的 tiled GEMM 核，并用它完成了 Q/K/V projection 的第一版验证。后续会继续补 CNN 和 Transformer 的小模块，最后再进入任务 2 的指令化控制器。
 
 ## 当前状态
 
-已经完成：
+已经完成并验证：
 
-1. 最小 `4x4` INT8 GEMM。
-2. 扩展到运行时 `N/K/M` 的 tiled GEMM。
-3. 加入 `A_bram`、`B_bram`、`localA/localB/localC`，理解片上 buffer 和局部并行访问。
-4. 支持 `N/K/M` 不是 tile 整数倍时的边界处理。
-5. 支持 `INT8 x INT8 -> INT32 accumulate -> >> 8` 的简单量化右移。
-6. 加入 `update_A`，在连续 GEMM 中复用 `A_bram`。
-7. 用当前 GEMM 实现 QKV projection：`Q=XWq`、`K=XWk`、`V=XWv`。
-8. 使用 Python baseline、HLS C simulation、HLS C synthesis 做验证。
+1. `INT8 x INT8 -> INT32 accumulate` 的 tiled GEMM，GEMM core 不再硬编码输出右移。
+2. `GEMM_MAX_N/K/M = 16/96/96`，`GEMM_TILE = 4` 的第一版扩容。
+3. 固定参数 CNN Conv2D：`Input[3,6,6]`、`Weight[4,3,3,3]`，映射为 `A[16,27] x B[27,4]`。
+4. Transformer QKV projection：`X[16,96] x W[96,96]`。
+5. Attention score：`Q[16,96] x K^T[96,16]`。
+6. Attention no-softmax：`Score_q[16,16] x V_q[16,96]`。
+7. Attention row-normalization 近似版：`P_q[16,16] x V_q[16,96]`。
+8. GEMM / Conv / QKV / Attention 均完成 C-sim、C-synth、C/RTL cosim。
 
-当前最新 QKV 验证：
+这里的 `*_top()` 都是 HLS 单元验证入口；以后真正给 `accelerator_top()` 调用的应该是 `gemm_tiled()`、`conv2d_gemm()`、`qkv_projection()`、`attention_core()` 这类 core 函数。
 
-```text
-X[7,6] x Wq/Wk/Wv[6,6] -> Q/K/V[7,6]
-Q/K/V = (X x W*) >> 8
-mismatch_count = 0
-max_abs_error  = 0
-checksum       = 93935
-```
+## 当前核心参数
 
-## 后续任务目标
+| 参数 | 当前值 | 我的理解 |
+| --- | --- | --- |
+| `GEMM_MAX_N` | 16 | HLS 综合时数组 N 维最大容量 |
+| `GEMM_MAX_K` | 96 | HLS 综合时数组 K 维最大容量 |
+| `GEMM_MAX_M` | 96 | HLS 综合时数组 M 维最大容量 |
+| `GEMM_TILE` | 4 | 4x4 局部计算 tile，也就是当前微核并行粒度 |
+| `GEMM_BLOCK_M` | 8 | B/C 按输出列分块缓存，降低一次缓存整列 M 的压力 |
+| `gemm_data_t` | `ap_int<8>` | 输入和权重量化数据 |
+| `gemm_acc_t` | `ap_int<32>` | 输出和中间累加数据 |
 
-### 阶段 1：补齐 CNN 小模块
+`GEMM_MAX_*` 是硬件综合出来的最大数组容量；`N/K/M` 是每次调用时传入的实际尺寸。比如当前 `gemm_tiled()` 可以用同一份硬件跑 `7x6x5` 的 GEMM，也可以支撑 `16x96x96` 级别的 QKV。
 
-先把 CNN 卷积和 GEMM 的关系讲清楚，再做一个可验证的 HLS 小模块。
+我这次只扩大 `GEMM_MAX_N/K/M`，没有扩大 `GEMM_TILE`。原因是 `GEMM_TILE=4` 已经对应 16 路局部 MAC，先保持微核简单、时序压力小；扩大最大容量主要增加片上 buffer 和循环次数，更适合当前验证 CNN/Transformer 映射关系。
 
-计划：
-
-1. 先实现 `1x1 conv`，因为它可以直接看成 GEMM。
-2. 再考虑 `3x3 conv + im2col`，把卷积窗口展开成矩阵。
-3. 写 `conv_top()` 和 `tb_conv.cpp`。
-4. 写 Python baseline，对比 HLS C-sim 输出。
-5. 综合后记录 LUT/FF/DSP/BRAM、II、Fmax。
-
-第一版只需要证明“一个卷积层可以映射到 GEMM 计算单元”，不急着做完整 CNN 网络。
-
-### 阶段 2：补齐 Transformer 小模块
-
-当前已经完成 QKV projection。后续继续往 Attention 方向推进。
-
-计划：
-
-1. 继续验证 `QK^T`：`S = Q x K^T`。
-2. 继续验证 `S x V`：`O = S x V`。
-3. 先做一个 attention 子模块，不急着一上来做多层多头完整 Encoder。
-4. 如果时间允许，再整理成一个最小 `attention_top()` 或简化 `encoder_block_top()`。
-5. 同样用 Python baseline + HLS C-sim + HLS C-synth 验证。
-
-这一阶段重点是说明：Transformer Encoder 里的核心计算也可以拆成几类矩阵乘。
-
-### 阶段 3：任务 2，最小指令集和 accelerator_top
-
-老师说的第二个任务，我现在更准确地理解为：
+当前我把 GEMM core 和量化后处理分开理解：
 
 ```text
-设计一套小型神经网络算子 micro-instruction，
-用固定宽度指令描述网络层或算子，
-再由 accelerator_top 取指、译码、配置参数、调用计算单元。
+gemm_tiled()
+  -> 只做原始矩阵乘和 INT32 累加
+  -> C = A x B
+
+saturate_to_int8(x, shift)
+  -> 需要继续喂给 INT8 GEMM 时再做
+  -> 右移 shift + 饱和到 [-128,127]
 ```
 
-它不是完整 RISC-V，也不是通用 CPU，而是一个面向 GEMM / Conv / Attention 的最小算子指令控制器。
-
-第一版建议使用 64-bit 指令字：
-
-```cpp
-typedef ap_uint<64> instr_word_t;
-```
-
-示例字段：
-
-```text
-[63:56] opcode
-[55:48] flags / func
-[47:40] dst buffer id
-[39:32] src0 buffer id
-[31:24] src1 buffer id
-[23:16] arg0
-[15:8]  arg1
-[7:0]   arg2
-```
-
-最小 opcode 可以先定义：
-
-```text
-CONFIG_NKM
-CONFIG_SCALE
-GEMM
-CONV2D
-QKV
-ATTN
-END
-```
-
-第一版 `accelerator_top()` 可以先用 HLS 数组模拟 instruction memory 和 data buffer，重点验证：
-
-```text
-取指 -> 译码 -> 配置寄存器 -> 调用 GEMM/Conv/Transformer 子模块 -> 状态返回
-```
-
-等 C-sim / C-synth 跑通后，再考虑把顶层接口改成 AXI-Lite + AXI Master / DMA。
-
-### 阶段 4：上板接口规划
-
-小模块阶段的 `gemm_top()`、`conv_top()`、`qkv_top()` 主要用于单元验证。真正上板时，应该重点规划系统级顶层：
-
-```text
-accelerator_top()
-```
-
-可能的数据流：
-
-```text
-PS 把 instruction / A / B / weights 写入 DDR
-PS 通过 AXI-Lite 写 start、instr_base、data_base、instr_num 等控制寄存器
-PL accelerator_top 通过 AXI Master 或 DMA 读取 DDR
-PL 执行指令并写回结果
-PS 等待 done，然后读取输出
-```
-
-因此最终顶层接口更可能是：
-
-```cpp
-#pragma HLS INTERFACE m_axi     port=instr_mem offset=slave bundle=gmem0
-#pragma HLS INTERFACE m_axi     port=A         offset=slave bundle=gmem1
-#pragma HLS INTERFACE m_axi     port=B         offset=slave bundle=gmem2
-#pragma HLS INTERFACE m_axi     port=C         offset=slave bundle=gmem3
-
-#pragma HLS INTERFACE s_axilite port=instr_mem bundle=control
-#pragma HLS INTERFACE s_axilite port=A         bundle=control
-#pragma HLS INTERFACE s_axilite port=B         bundle=control
-#pragma HLS INTERFACE s_axilite port=C         bundle=control
-#pragma HLS INTERFACE s_axilite port=instr_num bundle=control
-#pragma HLS INTERFACE s_axilite port=return    bundle=control
-```
-
-这一部分后续再做。目前先把算子和指令控制逻辑在 C-sim 里跑通。
+这样做的好处是 GEMM 单元更干净，Python/C++ baseline 可以直接按矩阵乘对齐；CNN 输出如果只是作为 INT32 特征结果，不需要被固定右移；Transformer 的 Q/K/V、Score 这类中间值需要继续参与 INT8 GEMM 时，再由每个阶段单独配置 `q_shift`、`score_shift` 或 `p_shift`。
 
 ## 工程目录
 
 ```text
 gzy_gemm_accel/
   README.md
-  .gitignore
+  README_conv.md
+  README_attention.md
   hls/
     src/
-      gemm_types.h       # GEMM 尺寸、tile、量化右移和 ap_int 类型
-      gemm_core.h        # gemm_tiled 与 gemm_top 的函数声明
-      gemm_core.cpp      # tiled GEMM 核心实现
-      gemm_top.cpp       # GEMM HLS 顶层函数和接口 pragma
-      qkv_projection.h   # QKV projection 函数声明
-      qkv_projection.cpp # 用 gemm_tiled 计算 Q/K/V
-      qkv_top.cpp        # QKV HLS 顶层函数
+      gemm_types.h
+      gemm_core.h
+      gemm_core.cpp
+      gemm_top.cpp
+      conv_types.h
+      conv_core.h
+      conv_core.cpp
+      conv_top.h
+      conv_top.cpp
+      qkv_projection.h
+      qkv_projection.cpp
+      qkv_top.cpp
+      attention_core.h
+      attention_core.cpp
+      attention_top.cpp
     tb/
-      tb_gemm.cpp        # GEMM C simulation testbench
-      tb_qkv.cpp         # QKV C simulation testbench
+      tb_gemm.cpp
+      tb_conv.cpp
+      tb_qkv.cpp
+      tb_attention.cpp
     scripts/
-      run_hls_gemm.tcl   # 自动运行 GEMM csim/csynth
-      run_hls_qkv.tcl    # 自动运行 QKV csim/csynth
-  python/
-    golden/
-      gemm_4x4_baseline.py
-      qkv_projection_baseline.py
+      run_hls_gemm.tcl
+      run_hls_gemm_clean.tcl
+      run_hls_conv.tcl
+      run_hls_qkv.tcl
+      run_hls_attention_score.tcl
+      run_hls_attention_no_softmax.tcl
+      run_attention_hls.tcl
+  python/golden/
   docs/
     iteration_001_minimal_gemm.md
     iteration_002_tiled_gemm.md
     iteration_003_buffer_boundary_quant.md
     iteration_004_qkv_projection.md
-  reports/               # 后续手动整理的报告摘要
-  vitis_hls_project/     # Vitis HLS 工具生成目录，本地保留，不上传
+    iteration_005_conv2d_gemm.md
+    iteration_006_attention.md
+    iteration_007_expand_16_96_96.md
+    iteration_008_conv_init_optimization.md
+  vitis_hls_project/   # Vitis HLS 生成目录，本地保留，不上传
 ```
 
-源码主要维护在 `hls/src`、`hls/tb`、`hls/scripts` 和 `python/golden`。`vitis_hls_project/` 是工具生成目录，已经被 `.gitignore` 忽略。
+## 主要模块
 
-## 当前功能文件说明
-
-| 文件 | 作用 |
-| --- | --- |
-| `hls/src/gemm_types.h` | 定义 `GEMM_MAX_N/K/M`、`GEMM_TILE`、`GEMM_BLOCK_M`、`GEMM_OUT_SHIFT` 和数据类型。 |
-| `hls/src/gemm_core.h` | 声明 `gemm_tiled` 和 HLS 顶层 `gemm_top`。 |
-| `hls/src/gemm_core.cpp` | 实现 tiled GEMM、片上 buffer、边界补 0、右移输出和 `update_A`。 |
-| `hls/src/gemm_top.cpp` | GEMM 单元验证用 HLS 顶层，设置 `ap_memory` 和 `ap_ctrl_hs`。 |
-| `hls/src/qkv_projection.cpp` | 顺序调用三次 `gemm_tiled`，计算 Q/K/V。 |
-| `hls/src/qkv_top.cpp` | QKV 单元验证用 HLS 顶层。 |
-| `hls/tb/tb_gemm.cpp` | 生成固定 A/B，调用 `gemm_top`，用 C++ golden 检查输出。 |
-| `hls/tb/tb_qkv.cpp` | 生成固定 X/Wq/Wk/Wv，检查 Q/K/V 输出。 |
-| `python/golden/gemm_4x4_baseline.py` | Python GEMM baseline。 |
-| `python/golden/qkv_projection_baseline.py` | Python QKV baseline。 |
-
-## 环境说明
-
-| 项目 | 当前值 |
-| --- | --- |
-| OS | WSL2 Ubuntu on Windows |
-| Vitis HLS / Vivado version | Vitis HLS 2020.2；Vivado 2020.2 已安装但当前未使用 |
-| C++ compiler | HLS C-sim 使用 Vitis HLS 自带 GCC |
-| Python version | Python 3.12.3 |
-| NumPy version | 当前 baseline 未使用 NumPy |
-| Target FPGA | `xc7z020clg400-2` |
-| Target clock | 10 ns，即 100 MHz |
-
-当前没有使用 `uv`、PyTorch、cocotb、iverilog、Verilator 或 Vivado RTL 仿真。当前验证主要依赖 Python 和 Vitis HLS C simulation / C synthesis。
-
-## 当前 GEMM 核心参数
-
-| 参数 | 值 | 含义 |
+| 模块 | 作用 | 数学含义 |
 | --- | --- | --- |
-| `GEMM_MAX_N` | 8 | 当前 HLS 数组行维度综合上限 |
-| `GEMM_MAX_K` | 8 | 当前 K 维综合上限 |
-| `GEMM_MAX_M` | 8 | 当前输出列维度综合上限 |
-| `GEMM_TILE` | 4 | 局部 `4x4` GEMM tile |
-| `GEMM_BLOCK_M` | 8 | B/C 按输出列缓存的块宽；当前等于 `GEMM_MAX_M`，主要是为后续大 M 分块预留 |
-| `GEMM_OUT_SHIFT` | 8 | 输出右移位数，模拟定点量化 scale |
-| `gemm_data_t` | `ap_int<8>` | A/B 输入数据类型 |
-| `gemm_acc_t` | `ap_int<32>` | C 输出和中间累加数据类型 |
+| `gemm_tiled` | 通用 INT8 GEMM 核 | `C = A x B`，输出为 INT32 累加结果 |
+| `conv2d_gemm` | Conv2D lowering/im2col 后调用 GEMM | `Conv2D -> A x B -> output` |
+| `qkv_projection` | 复用同一个 X，依次计算 Q/K/V | `Q=XWq, K=XWk, V=XWv` |
+| `attention_score_core` | 计算 Attention score | `Score = Q_q x K_q^T` |
+| `attention_no_softmax_core` | 暂不做 softmax，先验证完整矩阵流 | `Out = Score_q x V_q` |
+| `attention_core` | row-normalization 近似 attention | `Out = P_q x V_q` |
 
-`GEMM_MAX_*` 是综合时固定数组上限；`N/K/M` 是运行时传入的实际规模。当前最大尺寸设为 8，是为了快速学习、仿真和综合；后续会逐步扩展到更接近 Transformer 的规模。
-
-## 当前硬件结构理解
-
-当前 `gemm_tiled` 可以理解为：
-
-```text
-外部 A/B ap_memory
-  -> update_A=true 时，A_bram 缓存 A 的有效区域
-  -> update_A=false 时，A_bram 复用上一轮 A
-  -> B_bram 缓存当前输出列块
-  -> localA/localB/localC 完全 partition
-  -> dot_k 中 16 路局部输出并行更新
-  -> localC >> 8 写回 C 的有效区域
-```
-
-这里还不是完整 systolic array，也没有 AXI DMA，但已经包含 FPGA GEMM 微核最基础的几个点：tile 分块、K 维累加、片上数据复用、局部并行 MAC、边界补 0 和定点右移。
-
-## 顶层接口理解
-
-当前 `gemm_top()` 里写：
-
-```cpp
-#pragma HLS INTERFACE ap_memory port=A
-#pragma HLS INTERFACE ap_memory port=B
-#pragma HLS INTERFACE ap_memory port=C
-#pragma HLS INTERFACE ap_ctrl_hs port=return
-```
-
-这是单元验证阶段比较简单的接口写法：
-
-```text
-A/B/C 是数组，所以先让 HLS 生成 memory-like 端口；
-N/K/M/update_A 是标量，HLS 可以推断成普通输入端口；
-ap_ctrl_hs 生成 start/done/idle/ready 这类函数级握手信号。
-```
-
-这些小模块 top 主要服务于 C-sim、C-synth 和之后可能的 C/RTL cosim。真正上板时，重点应该在最终 `accelerator_top()` 统一规划 AXI-Lite、AXI Master 或 DMA 接口。
+`Q/K/V` 先由 GEMM 得到 `gemm_acc_t`，后续再喂给 GEMM 前必须用 `saturate_to_int8()` 做右移、截断和饱和，转回 `gemm_data_t`。
 
 ## 如何运行
 
-### 1. GEMM Python baseline
+Python baseline：
 
 ```bash
-cd /mnt/c/Transformer/gzy_gemm_accel
 python3 python/golden/gemm_4x4_baseline.py
-```
-
-### 2. QKV Python baseline
-
-```bash
-cd /mnt/c/Transformer/gzy_gemm_accel
 python3 python/golden/qkv_projection_baseline.py
 ```
 
-### 3. GEMM HLS C simulation and C synthesis
+Windows / Vitis HLS 2020.2：
 
 ```bat
 C:\xilinx\Vitis_HLS\2020.2\bin\vitis_hls.bat -f C:\Transformer\gzy_gemm_accel\hls\scripts\run_hls_gemm.tcl
+C:\xilinx\Vitis_HLS\2020.2\bin\vitis_hls.bat -f C:\Transformer\gzy_gemm_accel\hls\scripts\run_hls_conv.tcl
+C:\xilinx\Vitis_HLS\2020.2\bin\vitis_hls.bat -f C:\Transformer\gzy_gemm_accel\hls\scripts\run_hls_qkv.tcl
+C:\xilinx\Vitis_HLS\2020.2\bin\vitis_hls.bat -f C:\Transformer\gzy_gemm_accel\hls\scripts\run_hls_attention_score.tcl
+C:\xilinx\Vitis_HLS\2020.2\bin\vitis_hls.bat -f C:\Transformer\gzy_gemm_accel\hls\scripts\run_hls_attention_no_softmax.tcl
+C:\xilinx\Vitis_HLS\2020.2\bin\vitis_hls.bat -f C:\Transformer\gzy_gemm_accel\hls\scripts\run_attention_hls.tcl
 ```
 
-### 4. QKV HLS C simulation and C synthesis
+如果 `mini_gemm_accel/solution1/sim/verilog` 被 Windows 工具锁住，可以用干净工程名复查 GEMM：
 
 ```bat
-C:\xilinx\Vitis_HLS\2020.2\bin\vitis_hls.bat -f C:\Transformer\gzy_gemm_accel\hls\scripts\run_hls_qkv.tcl
+C:\xilinx\Vitis_HLS\2020.2\bin\vitis_hls.bat -f C:\Transformer\gzy_gemm_accel\hls\scripts\run_hls_gemm_clean.tcl
+```
+
+脚本都会依次执行：
+
+```text
+csim_design
+csynth_design
+cosim_design -rtl verilog
 ```
 
 ## 验证结果
 
-| Case | 维度 | Baseline | HLS C-sim | 结果 | max_abs_error | mismatch_count | checksum |
+| Case | 维度 | C-sim | C-synth | C/RTL cosim | mismatch | max_abs_error | checksum |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| GEMM basic | `A[4,4] x B[4,4]` | Python / C++ golden | HLS C-sim | PASS | 0 | 0 | 见日志 001 |
-| Tiled GEMM | `A[8,8] x B[8,8]` | Python / C++ golden | HLS C-sim | PASS | 0 | 0 | 358080 |
-| Buffer + Boundary + Quant GEMM | `A[7,6] x B[6,5]`，`>> 8` | Python / C++ golden | HLS C-sim | PASS | 0 | 0 | -140 |
-| QKV projection | `X[7,6] x Wq/Wk/Wv[6,6]`，`>> 8` | Python / C++ golden | HLS C-sim | PASS | 0 | 0 | 93935 |
-| CNN Conv via GEMM | 先做 `1x1 conv`，再考虑 `3x3 im2col` | Python | HLS C-sim | 待完成 | 待完成 | 待完成 | 待完成 |
-| Attention QK^T | `Q x K^T` | Python | HLS C-sim | 待完成 | 待完成 | 待完成 | 待完成 |
-| Attention S x V | `S x V` | Python | HLS C-sim | 待完成 | 待完成 | 待完成 | 待完成 |
-| Instruction accelerator | 64-bit micro-instruction dispatch | C++ golden | HLS C-sim | 待完成 | 待完成 | 待完成 | 待完成 |
+| GEMM | `A[7,6] x B[6,5]` | PASS | PASS | PASS | 0 | 0 | 56726 |
+| Conv2D via GEMM | `Input[3,6,6]`, `Weight[4,3,3,3]`, `A[16,27] x B[27,4]` | PASS | PASS | PASS | 0 | 0 | -72952 |
+| QKV projection | `X[16,96] x W[96,96]` | PASS | PASS | PASS | 0 | 0 | 265116672 |
+| Attention score | `Q[16,96] x K^T[96,16]` | PASS | PASS | PASS | 0 | 0 | -31663104 |
+| Attention no-softmax + row-normalization | `Score_q[16,16] x V_q[16,96]` / `P_q[16,16] x V_q[16,96]` | PASS | PASS | PASS | 0 | 0 | 74785584 |
 
-## HLS 综合结果
+## 综合与 cosim 摘要
 
-| Module | LUT | FF | DSP | BRAM_18K | Latency | II / Interval | Fmax / Timing |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| `gemm_top` / `gemm_tiled` | 4931 | 3820 | 16 | 2 | 顶层因运行时 `N/K/M` 显示 `?` | 核心循环均满足 `II=1` | Estimated clock 7.050 ns，约 141.84 MHz |
-| `qkv_top` / `qkv_projection` | 5080 | 3827 | 16 | 2 | 顶层因运行时 `N/D` 显示 `?` | `gemm_tiled` 核心循环满足 `II=1` | Estimated clock 7.300 ns，约 136.99 MHz |
+| Top | BRAM_18K | DSP | FF | LUT | Estimated clock | RTL latency |
+| --- | --- | --- | --- | --- | --- | --- |
+| `gemm_top` | 2 | 16 | 3914 | 5226 | 7.142 ns | 544 cycles |
+| `conv_top` | 15 | 36 | 47329 | 37207 | 7.272 ns | 3154 cycles |
+| `qkv_top` | 2 | 16 | 3921 | 5375 | 7.300 ns | 360362 cycles |
+| `attention_score_top` | 10 | 17 | 4517 | 5764 | 7.050 ns | max 23025 cycles |
+| `attention_no_softmax_top` | 37 | 49 | 13135 | 18117 | 7.300 ns | max 407139 cycles |
+| `attention_top` | 37 | 49 | 15884 | 20155 | 7.300 ns | max 408064 cycles |
 
-关键综合输出：
+`attention_top` 里 row-normalization 目前使用整数除法，HLS 生成了 `sdiv`，所以它是一个能跑通的第一版近似，不是最终资源优化版本。
+
+Conv2D 这里已经去掉了 wrapper 里对 `A/B/C` 最大矩阵的全量初始化。因为当前层只实际使用 `A[16,27]`、`B[27,4]`、`C[16,4]`，active 区域会被 im2col、weight flatten 和 GEMM 完整覆盖；删除 full-matrix init 后，Conv RTL latency 从 `15448 cycles` 降到 `3154 cycles`，数值验证不变。
+
+## 环境
+
+| 项目 | 当前值 |
+| --- | --- |
+| OS | WSL2 Ubuntu on Windows |
+| Vitis HLS / Vivado | 2020.2 |
+| Target FPGA | `xc7z020clg400-2` |
+| Target clock | 10 ns |
+| C++ compiler | Vitis HLS 自带 GCC |
+| Python | 3.12.3 |
+| 当前未使用 | PyTorch、Verilator、cocotb、上板 Vivado block design |
+
+## 后续路径思考
+
+我一开始会把任务 2 想得像“做一个 CPU 或 RISC-V”，现在更准确的理解是：先做一个面向神经网络算子的 micro-instruction 控制器。也就是固定宽度指令字里放 `opcode`、shape、scale、buffer id 等字段，然后 `accelerator_top()` 负责取指、译码、配置参数和调用 `gemm_tiled/conv2d_gemm/qkv_projection/attention_core`。
+
+后续上板时，我也想过能不能 PC 直接串口连 PL 顶层。现在我的理解是：不太建议这样做。串口通常先进 PS 或外部 USB-UART 控制逻辑，再由 PS 通过 AXI-Lite/AXI Master/DMA 去驱动 PL 加速器。PL 更适合做确定的数据通路和计算阵列；PS 更适合做串口协议、DDR 管理、启动停止和状态读取。
+
+所以我后面的优先级是：
 
 ```text
-Pipelining result : Target II = 1, Final II = 1, loop 'dot_k'
-**** Loop Constraint Status: All loop constraints were satisfied.
-**** Estimated Fmax: 141.84 MHz   # gemm_top
-**** Estimated Fmax: 136.99 MHz   # qkv_top
+1. 保持各算子 core 稳定。
+2. 做 C-sim 友好的 accelerator_top 指令解释器。
+3. 再把最终 accelerator_top 的接口改成 AXI-Lite 控制 + DDR/AXI/DMA 数据通路。
+4. 最后再考虑串口作为 PC 与 PS 的调试入口。
 ```
-
-## 迭代日志
-
-| 日志 | 内容 |
-| --- | --- |
-| `docs/iteration_001_minimal_gemm.md` | 最小 `4x4` GEMM，学习 `ap_int`、`ARRAY_PARTITION`、`UNROLL`、`PIPELINE` 和单元 top 接口。 |
-| `docs/iteration_002_tiled_gemm.md` | 扩展到 tiled GEMM，发现直接读 B 时容易被存储端口限制。 |
-| `docs/iteration_003_buffer_boundary_quant.md` | 合并记录片上 buffer、边界补 0 和右移量化。 |
-| `docs/iteration_004_qkv_projection.md` | 加入 `update_A`，并用 GEMM 实现 QKV projection。 |
-
-## 下一步
-
-1. 写 CNN `1x1 conv` 的 Python baseline、`conv_top()` 和 `tb_conv.cpp`。
-2. 在理解 im2col 后，尝试 `3x3 conv + GEMM`。
-3. 继续做 Transformer 的 `QK^T` 和 `S x V`。
-4. 设计 64-bit micro-instruction 格式和最小 `accelerator_top()`。
-5. 用 HLS C-sim 验证指令取指、译码、算子 dispatch。
-6. 最后再进入 AXI-Lite / AXI Master / DMA 的上板接口设计。

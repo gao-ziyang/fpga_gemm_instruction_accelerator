@@ -17,11 +17,19 @@ static void print_matrix(
     int cols
 ) {
     std::printf("%s\n", name);
-    for (int i = 0; i < rows; i++) {
-        for (int j = 0; j < cols; j++) {
+    int print_rows = rows < 4 ? rows : 4;
+    int print_cols = cols < 8 ? cols : 8;
+    for (int i = 0; i < print_rows; i++) {
+        for (int j = 0; j < print_cols; j++) {
             std::printf("%8d", (int)mat[i][j]);
         }
+        if (print_cols < cols) {
+            std::printf("     ...");
+        }
         std::printf("\n");
+    }
+    if (print_rows < rows) {
+        std::printf("  ...\n");
     }
 }
 
@@ -38,7 +46,7 @@ static void golden_projection(
             for (int k = 0; k < D; k++) {
                 acc += (gemm_acc_t)X[i][k] * (gemm_acc_t)W[k][j];
             }
-            Y[i][j] = acc >> GEMM_OUT_SHIFT;
+            Y[i][j] = acc;
         }
     }
 }
@@ -75,8 +83,10 @@ static int compare_matrix(
 }
 
 int main() {
-    const int N = 7;
-    const int D = 6;
+    const int N = 16;
+    const int D = 96;
+
+    std::printf("[TB] QKV shape: X[%d,%d] x W[%d,%d]\n", N, D, D, D);
 
     gemm_data_t X[GEMM_MAX_N][GEMM_MAX_K] = {0};
     gemm_data_t Wq[GEMM_MAX_K][GEMM_MAX_M] = {0};
