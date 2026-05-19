@@ -88,7 +88,6 @@ GEMM:   A[16,27] x B[27,4]
 | `hls/tb/tb_conv.cpp` | 测试数据按新 Conv shape 生成，并打印 `A[16,27] x B[27,4]`。 |
 | `hls/tb/tb_qkv.cpp` | QKV 测试扩到 `N=16,D=96`，golden 改成 raw INT32。 |
 | `hls/tb/tb_attention.cpp` | Attention 增加 `N=16,D=96` case，并显式使用 `q_shift=8`、`score_shift=8`。 |
-| `hls/scripts/run_hls_gemm_clean.tcl` | 当旧生成目录被锁住时，用干净工程名复查 GEMM cosim。 |
 | `README.md` / `README_conv.md` / `README_attention.md` | 更新到当前扩容后的状态。 |
 
 ## 验证过程
@@ -101,21 +100,13 @@ python3 python/golden/qkv_projection_baseline.py
 ```
 
 ```bat
-C:\xilinx\Vitis_HLS\2020.2\bin\vitis_hls.bat -f C:\Transformer\gzy_gemm_accel\hls\scripts\run_hls_gemm_clean.tcl
+C:\xilinx\Vitis_HLS\2020.2\bin\vitis_hls.bat -f C:\Transformer\gzy_gemm_accel\hls\scripts\run_hls_gemm.tcl
 C:\xilinx\Vitis_HLS\2020.2\bin\vitis_hls.bat -f C:\Transformer\gzy_gemm_accel\hls\scripts\run_hls_conv.tcl
 C:\xilinx\Vitis_HLS\2020.2\bin\vitis_hls.bat -f C:\Transformer\gzy_gemm_accel\hls\scripts\run_hls_qkv.tcl
 C:\xilinx\Vitis_HLS\2020.2\bin\vitis_hls.bat -f C:\Transformer\gzy_gemm_accel\hls\scripts\run_hls_attention_score.tcl
 C:\xilinx\Vitis_HLS\2020.2\bin\vitis_hls.bat -f C:\Transformer\gzy_gemm_accel\hls\scripts\run_hls_attention_no_softmax.tcl
 C:\xilinx\Vitis_HLS\2020.2\bin\vitis_hls.bat -f C:\Transformer\gzy_gemm_accel\hls\scripts\run_attention_hls.tcl
 ```
-
-原来的 `mini_gemm_accel` 工程在 cosim 阶段遇到过：
-
-```text
-Cannot delete directory 'sim/verilog': it is being used by another program.
-```
-
-这个不是计算错误，而是 Windows 生成目录被占用。我没有去删目录，而是新增了 `run_hls_gemm_clean.tcl`，换一个干净工程名 `mini_gemm_accel_check` 重新跑同一份源码，最后 GEMM cosim 通过。
 
 ## 终端关键结果
 

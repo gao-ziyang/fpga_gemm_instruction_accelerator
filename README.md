@@ -1,6 +1,6 @@
 # fpga_gemm_instruction_accelerator
 
-这是我围绕 FPGA GEMM、CNN 卷积映射、Transformer Attention 和后续指令式加速器控制做的 HLS 学习工程。当前做的是量化推理路径，不涉及训练。
+这是我围绕 FPGA GEMM、CNN 卷积映射、Transformer Attention 和后续指令式加速器控制做的 HLS 学习工程。
 
 我的阶段性路线是：
 
@@ -24,6 +24,7 @@ INT8 GEMM 微核
 6. Attention no-softmax：`Score_q[16,16] x V_q[16,96]`。
 7. Attention row-normalization 近似版：`P_q[16,16] x V_q[16,96]`。
 8. GEMM / Conv / QKV / Attention 均完成 C-sim、C-synth、C/RTL cosim。
+9. 固定 `N=16,K=96,M=96` 的 GEMM 并行规模 sweep：`TILE=4/8/12/14`，用于比较 DSP 使用、RTL latency 和理论性能 gap。
 
 这里的 `*_top()` 都是 HLS 单元验证入口；以后真正给 `accelerator_top()` 调用的应该是 `gemm_tiled()`、`conv2d_gemm()`、`qkv_projection()`、`attention_core()` 这类 core 函数。
 
@@ -34,14 +35,14 @@ INT8 GEMM 微核
 | `GEMM_MAX_N` | 16 | HLS 综合时数组 N 维最大容量 |
 | `GEMM_MAX_K` | 96 | HLS 综合时数组 K 维最大容量 |
 | `GEMM_MAX_M` | 96 | HLS 综合时数组 M 维最大容量 |
-| `GEMM_TILE` | 4 | 4x4 局部计算 tile，也就是当前微核并行粒度 |
+| `GEMM_TILE` | 默认 4 | 局部计算 tile，也就是当前微核并行粒度；benchmark Tcl 可以用宏临时覆盖 |
 | `GEMM_BLOCK_M` | 8 | B/C 按输出列分块缓存，降低一次缓存整列 M 的压力 |
 | `gemm_data_t` | `ap_int<8>` | 输入和权重量化数据 |
 | `gemm_acc_t` | `ap_int<32>` | 输出和中间累加数据 |
 
 `GEMM_MAX_*` 是硬件综合出来的最大数组容量；`N/K/M` 是每次调用时传入的实际尺寸。比如当前 `gemm_tiled()` 可以用同一份硬件跑 `7x6x5` 的 GEMM，也可以支撑 `16x96x96` 级别的 QKV。
 
-我这次只扩大 `GEMM_MAX_N/K/M`，没有扩大 `GEMM_TILE`。原因是 `GEMM_TILE=4` 已经对应 16 路局部 MAC，先保持微核简单、时序压力小；扩大最大容量主要增加片上 buffer 和循环次数，更适合当前验证 CNN/Transformer 映射关系。
+默认功能验证仍使用 `GEMM_TILE=4`，因为它对应 16 路局部 MAC，时序压力小，适合先验证 CNN/Transformer 映射关系。后续性能 sweep 会通过 Tcl 宏临时改成 `TILE=8/12/14`，用于观察更大并行阵列下的 DSP 使用、latency 和理论性能 gap。
 
 当前我把 GEMM core 和量化后处理分开理解：
 
@@ -70,6 +71,8 @@ gzy_gemm_accel/
       gemm_core.h
       gemm_core.cpp
       gemm_top.cpp
+      gemm_bench_top.h
+      gemm_bench_top.cpp
       conv_types.h
       conv_core.h
       conv_core.cpp
@@ -83,12 +86,13 @@ gzy_gemm_accel/
       attention_top.cpp
     tb/
       tb_gemm.cpp
+      tb_gemm_bench.cpp
       tb_conv.cpp
       tb_qkv.cpp
       tb_attention.cpp
     scripts/
       run_hls_gemm.tcl
-      run_hls_gemm_clean.tcl
+      run_hls_gemm_benchmark_sweep.tcl
       run_hls_conv.tcl
       run_hls_qkv.tcl
       run_hls_attention_score.tcl
@@ -104,6 +108,7 @@ gzy_gemm_accel/
     iteration_006_attention.md
     iteration_007_expand_16_96_96.md
     iteration_008_conv_init_optimization.md
+    iteration_009_gemm_benchmark_sweep.md
   vitis_hls_project/   # Vitis HLS 生成目录，本地保留，不上传
 ```
 
@@ -138,12 +143,7 @@ C:\xilinx\Vitis_HLS\2020.2\bin\vitis_hls.bat -f C:\Transformer\gzy_gemm_accel\hl
 C:\xilinx\Vitis_HLS\2020.2\bin\vitis_hls.bat -f C:\Transformer\gzy_gemm_accel\hls\scripts\run_hls_attention_score.tcl
 C:\xilinx\Vitis_HLS\2020.2\bin\vitis_hls.bat -f C:\Transformer\gzy_gemm_accel\hls\scripts\run_hls_attention_no_softmax.tcl
 C:\xilinx\Vitis_HLS\2020.2\bin\vitis_hls.bat -f C:\Transformer\gzy_gemm_accel\hls\scripts\run_attention_hls.tcl
-```
-
-如果 `mini_gemm_accel/solution1/sim/verilog` 被 Windows 工具锁住，可以用干净工程名复查 GEMM：
-
-```bat
-C:\xilinx\Vitis_HLS\2020.2\bin\vitis_hls.bat -f C:\Transformer\gzy_gemm_accel\hls\scripts\run_hls_gemm_clean.tcl
+C:\xilinx\Vitis_HLS\2020.2\bin\vitis_hls.bat -f C:\Transformer\gzy_gemm_accel\hls\scripts\run_hls_gemm_benchmark_sweep.tcl
 ```
 
 脚本都会依次执行：
@@ -163,6 +163,7 @@ cosim_design -rtl verilog
 | QKV projection | `X[16,96] x W[96,96]` | PASS | PASS | PASS | 0 | 0 | 265116672 |
 | Attention score | `Q[16,96] x K^T[96,16]` | PASS | PASS | PASS | 0 | 0 | -31663104 |
 | Attention no-softmax + row-normalization | `Score_q[16,16] x V_q[16,96]` / `P_q[16,16] x V_q[16,96]` | PASS | PASS | PASS | 0 | 0 | 74785584 |
+| GEMM benchmark sweep | `A[16,96] x B[96,96]`, `TILE=4/8/12/14` | PASS | PASS | PASS | 0 | 0 | 101159936 |
 
 ## 综合与 cosim 摘要
 
@@ -176,6 +177,25 @@ cosim_design -rtl verilog
 | `attention_top` | 37 | 49 | 15884 | 20155 | 7.300 ns | max 408064 cycles |
 
 `attention_top` 里 row-normalization 目前使用整数除法，HLS 生成了 `sdiv`，所以它是一个能跑通的第一版近似，不是最终资源优化版本。
+
+## GEMM 并行规模 sweep
+
+这一组实验固定 `N=16,K=96,M=96`，也就是 `total MAC = 147456`，只改变 `GEMM_TILE` 和对应的 `GEMM_BLOCK_M`。实际吞吐使用 C/RTL cosim 的 Verilog latency 计算：
+
+```text
+actual_mac_per_cycle = total_mac / rtl_latency
+GMAC/s @100MHz = actual_mac_per_cycle * 0.1
+GOPS @100MHz = GMAC/s * 2
+```
+
+| TILE | BLOCK_M | DSP | BRAM_18K | FF | LUT | Estimated clock | RTL latency | Actual MAC/cycle | GMAC/s @100MHz | GOPS @100MHz |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 4 | 8 | 16 | 2 | 1599 | 1552 | 7.136 ns | 118720 | 1.242 | 0.124 | 0.248 |
+| 8 | 8 | 64 | 2 | 5448 | 3441 | 7.136 ns | 54784 | 2.692 | 0.269 | 0.538 |
+| 12 | 12 | 144 | 2 | 11865 | 6824 | 7.136 ns | 52972 | 2.784 | 0.278 | 0.557 |
+| 14 | 14 | 197 | 2 | 16271 | 9393 | 7.136 ns | 54492 | 2.706 | 0.271 | 0.541 |
+
+这组结果说明 DSP 使用量确实能随 `TILE*TILE` 增大，但实际吞吐没有线性提升。主要原因是当前 latency 统计的是完整 `gemm_tiled()` 调用，包括 A/B 搬入片上缓存、local tile 搬运、边界处理和写回；这些阶段还没有和 `dot_k` 计算阶段做 dataflow overlap。`TILE=14` 已经使用 197 个 DSP，接近 ZYNQ-7020 的 DSP 上限，适合作为“接近吃满 DSP”的性能对比点，但后续系统集成时仍需要给 Conv/Attention 外围逻辑预留资源。
 
 Conv2D 这里已经做了两步优化：先去掉 wrapper 里对 `A/B/C` 最大矩阵的全量初始化，再把 `conv_top()` 外部接口改成 flat `input[108]`、`weight[108]`、`output[64]`，并用自增地址写 im2col/weight flatten/reshape。这样避免 HLS 为多维数组和非 2 的幂循环拍平生成大量 `urem/div/mul` 地址逻辑，Conv RTL latency 从 `15448 cycles` 降到 `2594 cycles`，额外 DSP 也从 36 降回 GEMM 微核本身的 16。
 
