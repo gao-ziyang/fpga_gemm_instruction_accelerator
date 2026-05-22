@@ -25,6 +25,9 @@ INT8 GEMM 微核
 7. Attention row-normalization 近似版：`P_q[16,16] x V_q[16,96]`。
 8. GEMM / Conv / QKV / Attention 均完成 C-sim、C-synth、C/RTL cosim。
 9. 固定 `N=16,K=96,M=96` 的 GEMM 并行规模 sweep：`TILE=4/8/12/14`，用于比较 DSP 使用、RTL latency 和理论性能 gap。
+10. 新增非 AXI 版系统验证路径：`gemm_core_mac -> gemm_scheduler -> instruction/decode -> accelerator_top`。
+11. 使用 `N=1024,K=1024,M=1024,TILE=12,BLOCK_N/K/M=96` 完成 V1/V2/V3 的 C-sim 和 C-synth。
+12. 使用 `N=128,K=128,M=128,TILE=12,BLOCK_N/K/M=96` 完成 V1/V2/V3 的 C/RTL cosim，用于验证 RTL 等价性。
 
 这里的 `*_top()` 都是 HLS 单元验证入口；以后真正给 `accelerator_top()` 调用的应该是 `gemm_tiled()`、`conv2d_gemm()`、`qkv_projection()`、`attention_core()` 这类 core 函数。
 
@@ -43,6 +46,20 @@ INT8 GEMM 微核
 `GEMM_MAX_*` 是硬件综合出来的最大数组容量；`N/K/M` 是每次调用时传入的实际尺寸。比如当前 `gemm_tiled()` 可以用同一份硬件跑 `7x6x5` 的 GEMM，也可以支撑 `16x96x96` 级别的 QKV。
 
 默认功能验证仍使用 `GEMM_TILE=4`，因为它对应 16 路局部 MAC，时序压力小，适合先验证 CNN/Transformer 映射关系。后续性能 sweep 会通过 Tcl 宏临时改成 `TILE=8/12/14`，用于观察更大并行阵列下的 DSP 使用、latency 和理论性能 gap。
+
+新增的 accelerator V1/V2/V3 路线使用独立的 `accelerator_types.h` 约束大矩阵验证规模。当前脚本里显式设置：
+
+```text
+GZY_GEMM_TILE      = 12
+GZY_ACCEL_BLOCK_N  = 96
+GZY_ACCEL_BLOCK_K  = 96
+GZY_ACCEL_BLOCK_M  = 96
+GZY_ACCEL_BENCH_N  = 1024
+GZY_ACCEL_BENCH_K  = 1024
+GZY_ACCEL_BENCH_M  = 1024
+```
+
+其中 `TILE=12` 对应约 144 路 MAC，`BLOCK_N/K/M=96` 对应每次搬入片上缓存的大块尺寸。
 
 当前我把 GEMM core 和量化后处理分开理解：
 
@@ -84,12 +101,25 @@ gzy_gemm_accel/
       attention_core.h
       attention_core.cpp
       attention_top.cpp
+      accelerator_types.h
+      gemm_scheduler.h
+      gemm_scheduler.cpp
+      gemm_scheduler_top.cpp
+      accelerator_instruction.h
+      accelerator_instruction.cpp
+      instruction_decode_top.cpp
+      accelerator_top.h
+      accelerator_top.cpp
     tb/
       tb_gemm.cpp
       tb_gemm_bench.cpp
       tb_conv.cpp
       tb_qkv.cpp
       tb_attention.cpp
+      accel_tb_common.h
+      tb_gemm_scheduler.cpp
+      tb_instruction_decode.cpp
+      tb_accelerator_top.cpp
     scripts/
       run_hls_gemm.tcl
       run_hls_gemm_benchmark_sweep.tcl
@@ -98,6 +128,13 @@ gzy_gemm_accel/
       run_hls_attention_score.tcl
       run_hls_attention_no_softmax.tcl
       run_attention_hls.tcl
+      run_hls_accel_v123.tcl
+      run_hls_accel_v1_scheduler.tcl
+      run_hls_accel_v2_decode.tcl
+      run_hls_accel_v3_top.tcl
+      run_hls_accel_v1_scheduler_cosim_small.tcl
+      run_hls_accel_v2_decode_cosim_small.tcl
+      run_hls_accel_v3_top_cosim_small.tcl
   python/golden/
   docs/
     iteration_001_minimal_gemm.md
@@ -109,6 +146,7 @@ gzy_gemm_accel/
     iteration_007_expand_16_96_96.md
     iteration_008_conv_init_optimization.md
     iteration_009_gemm_benchmark_sweep.md
+    iteration_010_accelerator_v1_v2_v3.md
   vitis_hls_project/   # Vitis HLS 生成目录，本地保留，不上传
 ```
 
@@ -122,6 +160,10 @@ gzy_gemm_accel/
 | `attention_score_core` | 计算 Attention score | `Score = Q_q x K_q^T` |
 | `attention_no_softmax_core` | 暂不做 softmax，先验证完整矩阵流 | `Out = Score_q x V_q` |
 | `attention_core` | row-normalization 近似 attention | `Out = P_q x V_q` |
+| `gemm_core_mac` | 最底层局部 MAC 阵列 | `localC += localA x localB` |
+| `gemm_scheduler` | 大矩阵分块、片上缓存和 partial sum 管理 | `A/B/C block -> local tile -> MAC array` |
+| `execute_instruction_stream` | 指令译码和算子 dispatch | `GEMM instruction -> gemm_scheduler` |
+| `accelerator_top` | 当前非 AXI 版系统验证顶层 | `instr_mem + A/B/C memory -> status` |
 
 `Q/K/V` 先由 GEMM 得到 `gemm_acc_t`，后续再喂给 GEMM 前必须用 `saturate_to_int8()` 做右移、截断和饱和，转回 `gemm_data_t`。
 
@@ -144,15 +186,18 @@ C:\xilinx\Vitis_HLS\2020.2\bin\vitis_hls.bat -f C:\Transformer\gzy_gemm_accel\hl
 C:\xilinx\Vitis_HLS\2020.2\bin\vitis_hls.bat -f C:\Transformer\gzy_gemm_accel\hls\scripts\run_hls_attention_no_softmax.tcl
 C:\xilinx\Vitis_HLS\2020.2\bin\vitis_hls.bat -f C:\Transformer\gzy_gemm_accel\hls\scripts\run_attention_hls.tcl
 C:\xilinx\Vitis_HLS\2020.2\bin\vitis_hls.bat -f C:\Transformer\gzy_gemm_accel\hls\scripts\run_hls_gemm_benchmark_sweep.tcl
+C:\xilinx\Vitis_HLS\2020.2\bin\vitis_hls.bat -f C:\Transformer\gzy_gemm_accel\hls\scripts\run_hls_accel_v123.tcl
 ```
 
-脚本都会依次执行：
+常规单元脚本会依次执行：
 
 ```text
 csim_design
 csynth_design
 cosim_design -rtl verilog
 ```
+
+`run_hls_accel_v1/v2/v3_*1024` 脚本只跑 `C-sim + C-synth`，因为 `1024^3` 的 RTL cosim 会仿真数千万周期；对应的 RTL 等价验证使用 `*_cosim_small.tcl` 在 `128^3` 规模下完成。
 
 ## 验证结果
 
@@ -164,6 +209,7 @@ cosim_design -rtl verilog
 | Attention score | `Q[16,96] x K^T[96,16]` | PASS | PASS | PASS | 0 | 0 | -31663104 |
 | Attention no-softmax + row-normalization | `Score_q[16,16] x V_q[16,96]` / `P_q[16,16] x V_q[16,96]` | PASS | PASS | PASS | 0 | 0 | 74785584 |
 | GEMM benchmark sweep | `A[16,96] x B[96,96]`, `TILE=4/8/12/14` | PASS | PASS | PASS | 0 | 0 | 101159936 |
+| Accelerator V1/V2/V3 large | `A[1024,1024] x B[1024,1024]`, `TILE=12,BLOCK=96` | PASS | PASS | 128 规模 PASS | 0 | 0 | 2087749971 |
 
 ## 综合与 cosim 摘要
 
@@ -175,8 +221,13 @@ cosim_design -rtl verilog
 | `attention_score_top` | 10 | 17 | 4517 | 5764 | 7.050 ns | max 23025 cycles |
 | `attention_no_softmax_top` | 37 | 49 | 13135 | 18117 | 7.300 ns | max 407139 cycles |
 | `attention_top` | 37 | 49 | 15884 | 20155 | 7.300 ns | max 408064 cycles |
+| `gemm_scheduler_top` V1, 1024 | 48 | 144 | 22842 | 15967 | 7.111 ns | 47393183 cycles |
+| `instruction_decode_top` V2, 1024 | 48 | 147 | 24629 | 17599 | 7.653 ns | 动态指令 top，最坏 latency 不作为性能值 |
+| `accelerator_top` V3, 1024 | 48 | 147 | 24629 | 17612 | 7.653 ns | 动态指令 top，最坏 latency 不作为性能值 |
 
 `attention_top` 里 row-normalization 目前使用整数除法，HLS 生成了 `sdiv`，所以它是一个能跑通的第一版近似，不是最终资源优化版本。
+
+V2/V3 的顶层 `N/K/M` 来自指令字段，HLS 综合报告会给出非常保守的动态最坏 latency；当前性能分析主要看 V1 固定尺寸 scheduler 的 `47393183 cycles`。V2/V3 用 128 规模 RTL cosim 验证控制路径和 RTL 等价性，Verilog latency 分别为 `315251 cycles`。
 
 ## GEMM 并行规模 sweep
 
