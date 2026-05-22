@@ -148,151 +148,62 @@ O1: TILE=14, BLOCK=112, A/B block 并行加载
 O2: TILE=14, BLOCK=112, A/B block 并行加载 + row banking=2
 ```
 
-## 当前我能完成的验证
+## 实际 HLS 验证结果
 
-当前 Codex 执行 shell 不能直接启动 Windows 版 Vitis HLS。报错是：
-
-```text
-cannot execute binary file
-Could not find 64-bit executable ... lnx64.o/vitis_hls does not exist
-```
-
-原因不是路径写错，而是这个 Codex shell 没有启用 Windows PE 互操作；它能看到 C 盘文件，但不能执行 Windows `.bat/.exe`。所以这一版我先做了普通 C++ 编译和运行，验证功能逻辑没有错；HLS 的 C-sim/C-synth/C/RTL cosim 需要在 Windows PowerShell 或 Vitis HLS Command Prompt 中运行 Tcl。
-
-我后来又单独尝试了：
-
-```bash
-/mnt/c/Windows/System32/cmd.exe /c ver
-```
-
-同样报：
-
-```text
-cannot execute binary file: Exec format error
-```
-
-再直接把 Windows PowerShell 当成 shell 启动，仍然是：
-
-```text
-Exec format error
-```
-
-检查 `/proc/sys/fs/binfmt_misc` 后，发现当前环境没有注册 Windows PE 执行器；同时 Linux 侧 Vitis HLS wrapper 也找不到 `lnx64.o/vitis_hls`。所以这个失败不是 Tcl 路径写错，也不是你的 Vitis 装错，而是当前 Codex 执行环境无法直接调用 Windows 工具链。
-
-普通 C++ 验证命令使用了 Xilinx HLS 的 `ap_int.h`：
-
-```bash
-g++ -std=c++11 -Wno-unknown-pragmas \
-  -Ihls/src -Ihls/tb \
-  -I/mnt/c/xilinx/Vitis_HLS/2020.2/include \
-  -DGZY_GEMM_TILE=14 \
-  -DGZY_GEMM_BLOCK_M=14 \
-  -DGZY_ACCEL_BLOCK_N=112 \
-  -DGZY_ACCEL_BLOCK_K=112 \
-  -DGZY_ACCEL_BLOCK_M=112 \
-  -DGZY_ACCEL_LOAD_AB_PARALLEL=1 \
-  -DGZY_ACCEL_LOCAL_ROW_UNROLL=2 \
-  -DGZY_ACCEL_MAX_N=128 \
-  -DGZY_ACCEL_MAX_K=128 \
-  -DGZY_ACCEL_MAX_M=128 \
-  -DGZY_ACCEL_BENCH_N=128 \
-  -DGZY_ACCEL_BENCH_K=128 \
-  -DGZY_ACCEL_BENCH_M=128 \
-  hls/src/gemm_core.cpp \
-  hls/src/gemm_scheduler.cpp \
-  hls/src/accelerator_instruction.cpp \
-  hls/src/accelerator_top.cpp \
-  hls/tb/tb_accelerator_top.cpp
-```
-
-输出结果：
-
-```text
-[V1] N=128 K=128 M=128 TILE=14 BLOCK_N=112 BLOCK_K=112 BLOCK_M=112 total_mac=2097152
-[V1] status=0 expected_status=0
-[V1] mismatch_count=0
-[V1] max_abs_error=0
-[V1] checksum=35200361
-[V1] PASS
-
-[V1] N=128 K=128 M=128 TILE=14 BLOCK_N=112 BLOCK_K=112 BLOCK_M=112 total_mac=2097152
-[V1] status=0 expected_status=0
-[V1] mismatch_count=0
-[V1] max_abs_error=0
-[V1] checksum=35200361
-[V1] PASS
-
-[V1] N=128 K=128 M=128 TILE=14 BLOCK_N=112 BLOCK_K=112 BLOCK_M=112 total_mac=2097152
-[V1] status=0 expected_status=0
-[V1] mismatch_count=0
-[V1] max_abs_error=0
-[V1] checksum=35200361
-[V1] PASS
-
-[V2] N=128 K=128 M=128 TILE=14 BLOCK_N=112 BLOCK_K=112 BLOCK_M=112 total_mac=2097152
-[V2] status=1 expected_status=1
-[V2] mismatch_count=0
-[V2] max_abs_error=0
-[V2] checksum=35200361
-[V2] PASS
-
-[V3] N=128 K=128 M=128 TILE=14 BLOCK_N=112 BLOCK_K=112 BLOCK_M=112 total_mac=2097152
-[V3] status=1 expected_status=1
-[V3] mismatch_count=0
-[V3] max_abs_error=0
-[V3] checksum=35200361
-[V3] PASS
-```
-
-上面三个 V1 分别对应：
-
-```text
-O0: serial load
-O1: A/B block 并行加载
-O2: A/B block 并行加载 + row banking=2
-```
-
-我还额外做了 `1024` 默认规模的 C++ 编译检查，确认当前 `TILE=14/BLOCK=112/64-bit instruction` 组合在普通 C++ 编译层面没有语法或链接问题；但没有在 CPU 上直接运行 `1024^3`，因为那会变成 10 亿级循环，和 HLS 验证目的不匹配。
-
-## Windows Vitis HLS 需要跑的命令
-
-这一版新增了完整 Tcl：
-
-```text
-hls/scripts/run_hls_accel_log11_opt.tcl
-```
-
-在 Windows PowerShell 或 Vitis HLS Command Prompt 中运行：
+这一轮已经可以直接调用 Windows 版 Vitis HLS 跑 Tcl。命令形式是：
 
 ```bat
-C:\xilinx\Vitis_HLS\2020.2\bin\vitis_hls.bat -f C:\Transformer\gzy_gemm_accel\hls\scripts\run_hls_accel_log11_opt.tcl
+C:\xilinx\Vitis_HLS\2020.2\bin\vitis_hls.bat -f C:\Transformer\gzy_gemm_accel\hls\scripts\run_hls_accel_log11_o5_scheduler.tcl
 ```
 
-这个脚本会依次跑：
-
-| Case | 规模 | 目的 |
-| --- | --- | --- |
-| `accel_log11_o0_tile14_serial_128` | 128 | TILE=14 串行调度基线 |
-| `accel_log11_o1_tile14_loadab_128` | 128 | A/B block 并行加载 |
-| `accel_log11_o2_tile14_loadab_bank2_128` | 128 | A/B 并行加载 + row banking=2 |
-| `accel_log11_v2_decode64_bank2_128` | 128 | 64-bit 指令 decode 路径 |
-| `accel_log11_v3_top64_bank2_128` | 128 | 64-bit accelerator_top 路径 |
-| `accel_log11_v1_tile14_bank2_1024` | 1024 | 最终大规模 scheduler C-sim/C-synth |
-| `accel_log11_v3_top64_bank2_1024` | 1024 | 最终大规模 accelerator_top C-sim/C-synth |
-
-其中 128 规模会跑：
+我这次没有再把每一个小想法都塞进 V1/V2/V3 全套顶层里，而是先固定测试：
 
 ```text
-C-sim + C-synth + C/RTL cosim
+N = 128, K = 128, M = 128
+total MAC = 2097152
+TILE = 14
+BLOCK_N/K/M = 112
 ```
 
-1024 规模只跑：
+这样规模不算小，RTL cosim 还能跑完，也方便观察 scheduler 本身的问题。
+
+| Case | 主要改动 | C-sim | C-synth | C/RTL cosim | BRAM_18K | DSP | FF | LUT | RTL latency | MAC/cycle |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| O0 | 串行加载基线 | PASS | PASS | PASS | 56 | 196 | 33470 | 49206 | 381634 | 5.50 |
+| O1 | A/B block 合并加载 | PASS | PASS | PASS | 56 | 196 | 33282 | 49023 | 381634 | 5.50 |
+| O2 | O1 + row banking=2 | PASS | PASS | PASS | 84 | 196 | 34317 | 67546 | 317122 | 6.61 |
+| O3 | 尝试把 local A/B load 合成一个循环 | PASS | PASS | 未跑长 cosim | 56 | 196 | 43062 | 27623 | 2979010 synth | 0.70 |
+| O4 | local A/B helper 函数 | PASS | PASS | PASS | 56 | 196 | 40296 | 83514 | 721602 | 2.91 |
+| O5 | helper 形参加 partition | PASS | PASS | PASS | 56 | 196 | 40296 | 83514 | 721602 | 2.91 |
+
+O5 的 C-sim/cosim 输出：
 
 ```text
-C-sim + C-synth
+[V1] N=128 K=128 M=128 TILE=14 BLOCK_N=112 BLOCK_K=112 BLOCK_M=112 total_mac=2097152
+[V1] status=0 expected_status=0
+[V1] mismatch_count=0
+[V1] max_abs_error=0
+[V1] checksum=35200361
+[V1] PASS
 ```
 
-因为 `1024^3` 的 RTL cosim 会非常慢，不适合作为每轮迭代的必跑项。
+## 这轮实验我看到的问题
+
+O1 没有比 O0 快，说明 `A_mem -> A_buf` 和 `B_mem -> B_buf` 这段合并加载不是当前最主要瓶颈。虽然代码结构上更并行了，但整体 latency 没降。
+
+O2 latency 从 `381634` 降到 `317122`，说明 local buffer 喂给 `localA/localB` 的阶段确实会卡住。row banking=2 能把部分 local load 从 14 拍压到 7 拍左右，所以实际有收益。但代价也很明显：LUT 到了 `67546`，超过 ZYNQ-7020 的可用 LUT 数量，这个版本只能说明方向有用，不能直接作为最终版本。
+
+O3/O4/O5 是我想进一步把 `load_local_a` 和 `load_local_b` 合并的尝试。结果并不好：
+
+```text
+load_local_ab_tile:
+  Target II = 1
+  Final II  = 7
+```
+
+HLS 报告里明确提示 `A_buf` memory ports 不够。即使 O5 在 helper 形参上补了 `ARRAY_PARTITION`，最终还是出现大量 `mux` 和 `urem`，LUT 到 `83514`，latency 也比 O0 更差。这个结果说明：把两个 load 硬合到一个 helper 里，并不会自动得到并行，反而可能让 HLS 的地址选择和端口调度更复杂。
+
+我这次学到的是：`UNROLL/PIPELINE/ARRAY_PARTITION` 不是孤立生效的。只有 bank 数、端口数、访问模式和循环结构都对得上，展开才会真的变快；否则就是用更多 LUT 生成更复杂的 mux 和控制逻辑。
 
 ## 这一版我对“是否每一步都跑 V1/V2/V3”的理解
 
@@ -315,29 +226,16 @@ C-sim + C-synth
 
 这也是这次 Tcl 的组织方式。这样既能覆盖功能，又不会每次都做非常耗时的重复验证。
 
-## 这一版还没有完成的 HLS 报告
-
-因为当前 shell 不能执行 Windows Vitis HLS，所以这一版的 HLS 表格还需要等 Windows 端跑完脚本后补上：
-
-| Case | C-sim | C-synth | C/RTL cosim | BRAM_18K | DSP | FF | LUT | Latency |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| O0 serial 128 | 待跑 | 待跑 | 待跑 | 待补 | 待补 | 待补 | 待补 | 待补 |
-| O1 loadAB 128 | 待跑 | 待跑 | 待跑 | 待补 | 待补 | 待补 | 待补 | 待补 |
-| O2 loadAB+bank2 128 | 待跑 | 待跑 | 待跑 | 待补 | 待补 | 待补 | 待补 | 待补 |
-| V2 decode64 128 | 待跑 | 待跑 | 待跑 | 待补 | 待补 | 待补 | 待补 | 待补 |
-| V3 top64 128 | 待跑 | 待跑 | 待跑 | 待补 | 待补 | 待补 | 待补 | 待补 |
-| V1 final 1024 | 待跑 | 待跑 | 不跑长 cosim | 待补 | 待补 | 待补 | 待补 | 待补 |
-| V3 final 1024 | 待跑 | 待跑 | 不跑长 cosim | 待补 | 待补 | 待补 | 待补 | 待补 |
-
 ## 后续想法
 
-如果 `loadAB` 和 `bank2` 在 HLS 报告里有明显收益，下一步可以继续试：
+这轮之后我觉得下一步不应该继续沿着 O4/O5 的 helper 合并方向走。更值得做的是：
 
 ```text
-1. row_unroll = 4
-2. 更激进的 A_buf/B_buf banking
-3. double buffer，把当前 compute 和下一块 load 重叠
-4. DATAFLOW，把 load/compute/store 拆成更清晰的数据流阶段
+1. 保留 O0/O1 这种资源相对可控的版本作为基线。
+2. 继续研究 O2 的 bank/unroll 思路，但要想办法降低 LUT。
+3. 把完整 block 和边界 block 分开，减少每个循环里的 if/mux。
+4. 用自增地址减少非 2 的幂 block 下的 urem/div 地址逻辑。
+5. 后面再考虑 double buffer 或 DATAFLOW，让 load/compute/store 真正重叠。
 ```
 
-但我现在也更谨慎了：全并行并不是“把 pragma 全部加满”。如果 bank 数量不够，UNROLL 只会生成巨大的 mux 和冲突；如果 bank 数量太多，又可能把 BRAM 和布线压力拉爆。所以后续每一步都应该看资源和 latency，而不是只看 DSP 数量。
+我现在也更谨慎了：全并行并不是“把 pragma 全部加满”。如果 bank 数量不够，UNROLL 只会生成巨大的 mux 和冲突；如果 bank 数量太多，又可能把 BRAM 和布线压力拉爆。所以后续每一步都应该看资源和 latency，而不是只看 DSP 数量。

@@ -28,7 +28,7 @@ INT8 GEMM 微核
 10. 新增非 AXI 版系统验证路径：`gemm_core_mac -> gemm_scheduler -> instruction/decode -> accelerator_top`。
 11. 使用 `N=1024,K=1024,M=1024,TILE=12,BLOCK_N/K/M=96` 完成 V1/V2/V3 的 C-sim 和 C-synth。
 12. 使用 `N=128,K=128,M=128,TILE=12,BLOCK_N/K/M=96` 完成 V1/V2/V3 的 C/RTL cosim，用于验证 RTL 等价性。
-13. 当前正在推进 log11 优化版：64-bit 指令、`TILE=14`、`BLOCK_N/K/M=112`、A/B block 并行加载、local row banking=2。该版本已完成普通 C++ 功能验证；当前 Codex shell 不能直接执行 Windows 版 Vitis HLS，HLS 报告需要在 Windows PowerShell 或 Vitis HLS Command Prompt 中运行 `run_hls_accel_log11_opt.tcl` 后补齐。
+13. 完成 log11 scheduler 优化实验：64-bit 指令、`TILE=14`、`BLOCK_N/K/M=112`、A/B block 合并加载、local row banking=2、local A/B helper 等版本均完成 HLS 验证或综合记录。当前结论是 O2 有 latency 收益但 LUT 超额，O4/O5 功能正确但性能变差，后续应重点优化 bank/unroll 的资源代价和地址逻辑。
 
 这里的 `*_top()` 都是 HLS 单元验证入口；以后真正给 `accelerator_top()` 调用的应该是 `gemm_tiled()`、`conv2d_gemm()`、`qkv_projection()`、`attention_core()` 这类 core 函数。
 
@@ -62,16 +62,17 @@ GZY_ACCEL_BENCH_M  = 1024
 
 其中 `TILE=12` 对应约 144 路 MAC，`BLOCK_N/K/M=96` 对应每次搬入片上缓存的大块尺寸。
 
-log11 当前优化版脚本使用：
+log11 scheduler 实验主要使用：
 
 ```text
 GZY_GEMM_TILE                = 14
 GZY_ACCEL_BLOCK_N/K/M        = 112
 GZY_ACCEL_LOAD_AB_PARALLEL   = 1
 GZY_ACCEL_LOCAL_ROW_UNROLL   = 2
+GZY_ACCEL_LOCAL_AB_PARALLEL  = 0/1
 ```
 
-指令字也从 128 bit 改成 64 bit，当前布局为 `opcode + N/K/M + base_unit`。由于当前 HLS 单元验证里 A/B/C 仍是分开的 memory port，base 字段先按 4096 element 对齐，后续真正接统一 DDR 地址空间时还需要重新设计寄存器或多条配置指令。
+指令字也从 128 bit 改成 64 bit，当前布局为 `opcode + N/K/M + base_unit`。`LOCAL_AB_PARALLEL=1` 的 helper 合并方向已经验证过功能正确，但 latency 和 LUT 都变差，所以后续不会沿着这个方向继续加码。由于当前 HLS 单元验证里 A/B/C 仍是分开的 memory port，base 字段先按 4096 element 对齐，后续真正接统一 DDR 地址空间时还需要重新设计寄存器或多条配置指令。
 
 当前我把 GEMM core 和量化后处理分开理解：
 
@@ -148,6 +149,9 @@ gzy_gemm_accel/
       run_hls_accel_v2_decode_cosim_small.tcl
       run_hls_accel_v3_top_cosim_small.tcl
       run_hls_accel_log11_opt.tcl
+      run_hls_accel_log11_o3_scheduler.tcl
+      run_hls_accel_log11_o4_scheduler.tcl
+      run_hls_accel_log11_o5_scheduler.tcl
   python/golden/
   docs/
     iteration_001_minimal_gemm.md
@@ -225,7 +229,7 @@ cosim_design -rtl verilog
 | Attention no-softmax + row-normalization | `Score_q[16,16] x V_q[16,96]` / `P_q[16,16] x V_q[16,96]` | PASS | PASS | PASS | 0 | 0 | 74785584 |
 | GEMM benchmark sweep | `A[16,96] x B[96,96]`, `TILE=4/8/12/14` | PASS | PASS | PASS | 0 | 0 | 101159936 |
 | Accelerator V1/V2/V3 large | `A[1024,1024] x B[1024,1024]`, `TILE=12,BLOCK=96` | PASS | PASS | 128 规模 PASS | 0 | 0 | 2087749971 |
-| Accelerator log11 C++ check | `A[128,128] x B[128,128]`, `TILE=14,BLOCK=112` | C++ PASS | 待 Windows HLS | 待 Windows HLS | 0 | 0 | 35200361 |
+| Accelerator log11 O0/O1/O2/O5 | `A[128,128] x B[128,128]`, `TILE=14,BLOCK=112` | PASS | PASS | PASS | 0 | 0 | 35200361 |
 
 ## 综合与 cosim 摘要
 
@@ -240,10 +244,16 @@ cosim_design -rtl verilog
 | `gemm_scheduler_top` V1, 1024 | 48 | 144 | 22842 | 15967 | 7.111 ns | 47393183 cycles |
 | `instruction_decode_top` V2, 1024 | 48 | 147 | 24629 | 17599 | 7.653 ns | 动态指令 top，最坏 latency 不作为性能值 |
 | `accelerator_top` V3, 1024 | 48 | 147 | 24629 | 17612 | 7.653 ns | 动态指令 top，最坏 latency 不作为性能值 |
+| log11 O0 scheduler | 56 | 196 | 33470 | 49206 | 7.218 ns | 381634 cycles |
+| log11 O1 loadAB | 56 | 196 | 33282 | 49023 | 7.165 ns | 381634 cycles |
+| log11 O2 loadAB+bank2 | 84 | 196 | 34317 | 67546 | 7.143 ns | 317122 cycles |
+| log11 O5 localAB helper | 56 | 196 | 40296 | 83514 | 7.165 ns | 721602 cycles |
 
 `attention_top` 里 row-normalization 目前使用整数除法，HLS 生成了 `sdiv`，所以它是一个能跑通的第一版近似，不是最终资源优化版本。
 
 V2/V3 的顶层 `N/K/M` 来自指令字段，HLS 综合报告会给出非常保守的动态最坏 latency；当前性能分析主要看 V1 固定尺寸 scheduler 的 `47393183 cycles`。V2/V3 用 128 规模 RTL cosim 验证控制路径和 RTL 等价性，Verilog latency 分别为 `315251 cycles`。
+
+log11 的几个小实验说明：`TILE=14` 可以把 DSP 提到 196 个，接近 ZYNQ-7020 上限；A/B block 合并加载本身没有降低 latency；row banking=2 能把 128 规模 RTL latency 从 `381634` 降到 `317122`，但 LUT 超过器件容量；local A/B helper 合并方向反而让端口调度和 mux 更复杂，latency 变差到 `721602`。所以后续优化重点不是盲目加并行，而是平衡计算并行度、片上缓存 bank 和地址/控制逻辑。
 
 ## GEMM 并行规模 sweep
 

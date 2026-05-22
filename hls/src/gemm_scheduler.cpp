@@ -130,6 +130,8 @@ static void load_local_ab_tile(
     int current_M
 ) {
 #pragma HLS INLINE off
+#pragma HLS ARRAY_PARTITION variable=A_buf cyclic factor=GZY_GEMM_TILE dim=2
+#pragma HLS ARRAY_PARTITION variable=B_buf cyclic factor=GZY_GEMM_TILE dim=2
 #pragma HLS ARRAY_PARTITION variable=localA complete dim=0
 #pragma HLS ARRAY_PARTITION variable=localB complete dim=0
 load_local_ab_row:
