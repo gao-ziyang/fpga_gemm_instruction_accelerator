@@ -10,8 +10,8 @@ set proj_parent [file join $root_dir "vitis_hls_project"]
 file mkdir $proj_parent
 cd $proj_parent
 
-set project_name "accel_v1_scheduler_tile12_1024"
-set cflags [format "-I%s -I%s -DGZY_GEMM_TILE=12 -DGZY_GEMM_BLOCK_M=12 -DGZY_ACCEL_BLOCK_N=96 -DGZY_ACCEL_BLOCK_K=96 -DGZY_ACCEL_BLOCK_M=96" $src_dir $tb_dir]
+set project_name "accel_v1_scheduler_tile14_1024"
+set cflags [format "-I%s -I%s -DGZY_GEMM_TILE=14 -DGZY_GEMM_BLOCK_M=14 -DGZY_ACCEL_BLOCK_N=112 -DGZY_ACCEL_BLOCK_K=112 -DGZY_ACCEL_BLOCK_M=112 -DGZY_ACCEL_LOAD_AB_PARALLEL=1 -DGZY_ACCEL_LOCAL_ROW_UNROLL=2" $src_dir $tb_dir]
 
 open_project -reset $project_name
 set_top gemm_scheduler_top

@@ -28,6 +28,7 @@ INT8 GEMM 微核
 10. 新增非 AXI 版系统验证路径：`gemm_core_mac -> gemm_scheduler -> instruction/decode -> accelerator_top`。
 11. 使用 `N=1024,K=1024,M=1024,TILE=12,BLOCK_N/K/M=96` 完成 V1/V2/V3 的 C-sim 和 C-synth。
 12. 使用 `N=128,K=128,M=128,TILE=12,BLOCK_N/K/M=96` 完成 V1/V2/V3 的 C/RTL cosim，用于验证 RTL 等价性。
+13. 当前正在推进 log11 优化版：64-bit 指令、`TILE=14`、`BLOCK_N/K/M=112`、A/B block 并行加载、local row banking=2。该版本已完成普通 C++ 功能验证；当前 Codex shell 不能直接执行 Windows 版 Vitis HLS，HLS 报告需要在 Windows PowerShell 或 Vitis HLS Command Prompt 中运行 `run_hls_accel_log11_opt.tcl` 后补齐。
 
 这里的 `*_top()` 都是 HLS 单元验证入口；以后真正给 `accelerator_top()` 调用的应该是 `gemm_tiled()`、`conv2d_gemm()`、`qkv_projection()`、`attention_core()` 这类 core 函数。
 
@@ -47,7 +48,7 @@ INT8 GEMM 微核
 
 默认功能验证仍使用 `GEMM_TILE=4`，因为它对应 16 路局部 MAC，时序压力小，适合先验证 CNN/Transformer 映射关系。后续性能 sweep 会通过 Tcl 宏临时改成 `TILE=8/12/14`，用于观察更大并行阵列下的 DSP 使用、latency 和理论性能 gap。
 
-新增的 accelerator V1/V2/V3 路线使用独立的 `accelerator_types.h` 约束大矩阵验证规模。当前脚本里显式设置：
+新增的 accelerator V1/V2/V3 路线使用独立的 `accelerator_types.h` 约束大矩阵验证规模。log10 已验证版本使用：
 
 ```text
 GZY_GEMM_TILE      = 12
@@ -60,6 +61,17 @@ GZY_ACCEL_BENCH_M  = 1024
 ```
 
 其中 `TILE=12` 对应约 144 路 MAC，`BLOCK_N/K/M=96` 对应每次搬入片上缓存的大块尺寸。
+
+log11 当前优化版脚本使用：
+
+```text
+GZY_GEMM_TILE                = 14
+GZY_ACCEL_BLOCK_N/K/M        = 112
+GZY_ACCEL_LOAD_AB_PARALLEL   = 1
+GZY_ACCEL_LOCAL_ROW_UNROLL   = 2
+```
+
+指令字也从 128 bit 改成 64 bit，当前布局为 `opcode + N/K/M + base_unit`。由于当前 HLS 单元验证里 A/B/C 仍是分开的 memory port，base 字段先按 4096 element 对齐，后续真正接统一 DDR 地址空间时还需要重新设计寄存器或多条配置指令。
 
 当前我把 GEMM core 和量化后处理分开理解：
 
@@ -135,6 +147,7 @@ gzy_gemm_accel/
       run_hls_accel_v1_scheduler_cosim_small.tcl
       run_hls_accel_v2_decode_cosim_small.tcl
       run_hls_accel_v3_top_cosim_small.tcl
+      run_hls_accel_log11_opt.tcl
   python/golden/
   docs/
     iteration_001_minimal_gemm.md
@@ -147,6 +160,7 @@ gzy_gemm_accel/
     iteration_008_conv_init_optimization.md
     iteration_009_gemm_benchmark_sweep.md
     iteration_010_accelerator_v1_v2_v3.md
+    iteration_011_scheduler_optimization.md
   vitis_hls_project/   # Vitis HLS 生成目录，本地保留，不上传
 ```
 
@@ -187,6 +201,7 @@ C:\xilinx\Vitis_HLS\2020.2\bin\vitis_hls.bat -f C:\Transformer\gzy_gemm_accel\hl
 C:\xilinx\Vitis_HLS\2020.2\bin\vitis_hls.bat -f C:\Transformer\gzy_gemm_accel\hls\scripts\run_attention_hls.tcl
 C:\xilinx\Vitis_HLS\2020.2\bin\vitis_hls.bat -f C:\Transformer\gzy_gemm_accel\hls\scripts\run_hls_gemm_benchmark_sweep.tcl
 C:\xilinx\Vitis_HLS\2020.2\bin\vitis_hls.bat -f C:\Transformer\gzy_gemm_accel\hls\scripts\run_hls_accel_v123.tcl
+C:\xilinx\Vitis_HLS\2020.2\bin\vitis_hls.bat -f C:\Transformer\gzy_gemm_accel\hls\scripts\run_hls_accel_log11_opt.tcl
 ```
 
 常规单元脚本会依次执行：
@@ -210,6 +225,7 @@ cosim_design -rtl verilog
 | Attention no-softmax + row-normalization | `Score_q[16,16] x V_q[16,96]` / `P_q[16,16] x V_q[16,96]` | PASS | PASS | PASS | 0 | 0 | 74785584 |
 | GEMM benchmark sweep | `A[16,96] x B[96,96]`, `TILE=4/8/12/14` | PASS | PASS | PASS | 0 | 0 | 101159936 |
 | Accelerator V1/V2/V3 large | `A[1024,1024] x B[1024,1024]`, `TILE=12,BLOCK=96` | PASS | PASS | 128 规模 PASS | 0 | 0 | 2087749971 |
+| Accelerator log11 C++ check | `A[128,128] x B[128,128]`, `TILE=14,BLOCK=112` | C++ PASS | 待 Windows HLS | 待 Windows HLS | 0 | 0 | 35200361 |
 
 ## 综合与 cosim 摘要
 

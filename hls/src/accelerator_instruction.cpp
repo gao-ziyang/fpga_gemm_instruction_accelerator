@@ -6,12 +6,12 @@ decoded_instr_t decode_instruction(accel_instr_word_t word) {
 #pragma HLS INLINE
     decoded_instr_t instr;
     instr.opcode = word.range(7, 0);
-    instr.N = (int)word.range(23, 8);
-    instr.K = (int)word.range(39, 24);
-    instr.M = (int)word.range(55, 40);
-    instr.a_base = (int)word.range(79, 56);
-    instr.b_base = (int)word.range(103, 80);
-    instr.c_base = (int)word.range(127, 104);
+    instr.N = (int)word.range(19, 8) + 1;
+    instr.K = (int)word.range(31, 20) + 1;
+    instr.M = (int)word.range(43, 32) + 1;
+    instr.a_base = (int)word.range(49, 44) * ACCEL_BASE_UNIT;
+    instr.b_base = (int)word.range(55, 50) * ACCEL_BASE_UNIT;
+    instr.c_base = (int)word.range(61, 56) * ACCEL_BASE_UNIT;
     return instr;
 }
 

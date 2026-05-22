@@ -1,5 +1,5 @@
-# Small RTL cosim for V1 scheduler.
-# It keeps TILE=14 and BLOCK=112, but uses 128^3 data so XSIM can finish quickly.
+# Focused log11 O4 run: TILE=14, BLOCK=112, combined external A/B load,
+# local A/B load through an isolated helper, no row-direction extra banking.
 
 set script_dir [file normalize [file dirname [info script]]]
 set root_dir   [file normalize [file join $script_dir "../.."]]
@@ -10,12 +10,11 @@ set proj_parent [file join $root_dir "vitis_hls_project"]
 file mkdir $proj_parent
 cd $proj_parent
 
-set project_name "accel_v1_scheduler_tile14_128_cosim"
-set cflags [format "-I%s -I%s -DGZY_GEMM_TILE=14 -DGZY_GEMM_BLOCK_M=14 -DGZY_ACCEL_BLOCK_N=112 -DGZY_ACCEL_BLOCK_K=112 -DGZY_ACCEL_BLOCK_M=112 -DGZY_ACCEL_LOAD_AB_PARALLEL=1 -DGZY_ACCEL_LOCAL_ROW_UNROLL=2 -DGZY_ACCEL_MAX_N=128 -DGZY_ACCEL_MAX_K=128 -DGZY_ACCEL_MAX_M=128 -DGZY_ACCEL_BENCH_N=128 -DGZY_ACCEL_BENCH_K=128 -DGZY_ACCEL_BENCH_M=128" $src_dir $tb_dir]
+set project_name "accel_log11_o4_tile14_localab_helper_128"
+set cflags [format "-I%s -I%s -DGZY_GEMM_TILE=14 -DGZY_GEMM_BLOCK_M=14 -DGZY_ACCEL_BLOCK_N=112 -DGZY_ACCEL_BLOCK_K=112 -DGZY_ACCEL_BLOCK_M=112 -DGZY_ACCEL_LOAD_AB_PARALLEL=1 -DGZY_ACCEL_LOCAL_ROW_UNROLL=1 -DGZY_ACCEL_LOCAL_AB_PARALLEL=1 -DGZY_ACCEL_MAX_N=128 -DGZY_ACCEL_MAX_K=128 -DGZY_ACCEL_MAX_M=128 -DGZY_ACCEL_BENCH_N=128 -DGZY_ACCEL_BENCH_K=128 -DGZY_ACCEL_BENCH_M=128" $src_dir $tb_dir]
 
 open_project -reset $project_name
 set_top gemm_scheduler_top
-
 add_files -cflags $cflags [file join $src_dir "gemm_core.cpp"]
 add_files -cflags $cflags [file join $src_dir "gemm_scheduler.cpp"]
 add_files -cflags $cflags [file join $src_dir "gemm_scheduler_top.cpp"]
@@ -30,7 +29,4 @@ csynth_design
 cosim_design -rtl verilog
 
 close_project
-
-if {![info exists ::GZY_NO_EXIT]} {
-    exit
-}
+exit

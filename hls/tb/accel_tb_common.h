@@ -111,12 +111,12 @@ static accel_instr_word_t tb_pack_gemm_instr(
 ) {
     accel_instr_word_t word = 0;
     word.range(7, 0) = ACCEL_OP_GEMM;
-    word.range(23, 8) = (ap_uint<16>)N;
-    word.range(39, 24) = (ap_uint<16>)K;
-    word.range(55, 40) = (ap_uint<16>)M;
-    word.range(79, 56) = (ap_uint<24>)a_base;
-    word.range(103, 80) = (ap_uint<24>)b_base;
-    word.range(127, 104) = (ap_uint<24>)c_base;
+    word.range(19, 8) = (ap_uint<12>)(N - 1);
+    word.range(31, 20) = (ap_uint<12>)(K - 1);
+    word.range(43, 32) = (ap_uint<12>)(M - 1);
+    word.range(49, 44) = (ap_uint<6>)(a_base / ACCEL_BASE_UNIT);
+    word.range(55, 50) = (ap_uint<6>)(b_base / ACCEL_BASE_UNIT);
+    word.range(61, 56) = (ap_uint<6>)(c_base / ACCEL_BASE_UNIT);
     return word;
 }
 

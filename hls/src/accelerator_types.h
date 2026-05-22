@@ -46,10 +46,11 @@ static const int ACCEL_B_ELEMS = ACCEL_MAX_K * ACCEL_MAX_M;
 static const int ACCEL_C_ELEMS = ACCEL_MAX_N * ACCEL_MAX_M;
 static const int ACCEL_MAX_INSTR = GZY_ACCEL_MAX_INSTR;
 
-typedef ap_uint<128> accel_instr_word_t;
+typedef ap_uint<64> accel_instr_word_t;
 
 static const ap_uint<8> ACCEL_OP_END = 0;
 static const ap_uint<8> ACCEL_OP_GEMM = 1;
+static const int ACCEL_BASE_UNIT = 4096;
 
 #ifndef GZY_ACCEL_BENCH_N
 #define GZY_ACCEL_BENCH_N 1024
