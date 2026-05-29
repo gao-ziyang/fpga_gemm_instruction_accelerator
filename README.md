@@ -29,6 +29,7 @@ INT8 GEMM 微核
 11. 使用 `N=1024,K=1024,M=1024,TILE=12,BLOCK_N/K/M=96` 完成 V1/V2/V3 的 C-sim 和 C-synth。
 12. 使用 `N=128,K=128,M=128,TILE=12,BLOCK_N/K/M=96` 完成 V1/V2/V3 的 C/RTL cosim，用于验证 RTL 等价性。
 13. 完成 log11 scheduler 优化实验：64-bit 指令、`TILE=14`、`BLOCK_N/K/M=112`、A/B block 合并加载、local row banking=2、local A/B helper 等版本均完成 HLS 验证或综合记录。当前结论是 O2 有 latency 收益但 LUT 超额，O4/O5 功能正确但性能变差，后续应重点优化 bank/unroll 的资源代价和地址逻辑。
+14. 新增内部 roofline 分析脚本，将 O0-O5 的 HLS 结果转成 external traffic、CTC、actual MAC/cycle、DSP 有效利用率和 local feeding 模型，作为后续 O6/O7 优化前的分析基线。
 
 这里的 `*_top()` 都是 HLS 单元验证入口；以后真正给 `accelerator_top()` 调用的应该是 `gemm_tiled()`、`conv2d_gemm()`、`qkv_projection()`、`attention_core()` 这类 core 函数。
 
@@ -153,6 +154,8 @@ gzy_gemm_accel/
       run_hls_accel_log11_o4_scheduler.tcl
       run_hls_accel_log11_o5_scheduler.tcl
   python/golden/
+  python/analysis/
+    roofline_model.py
   docs/
     iteration_001_minimal_gemm.md
     iteration_002_tiled_gemm.md
@@ -165,6 +168,11 @@ gzy_gemm_accel/
     iteration_009_gemm_benchmark_sweep.md
     iteration_010_accelerator_v1_v2_v3.md
     iteration_011_scheduler_optimization.md
+    iteration_012_internal_roofline_model.md
+    teacher_feedback_roofline_next_plan.md
+  reports/
+    internal_roofline_points.csv
+    internal_roofline_summary.md
   vitis_hls_project/   # Vitis HLS 生成目录，本地保留，不上传
 ```
 
@@ -192,6 +200,7 @@ Python baseline：
 ```bash
 python3 python/golden/gemm_4x4_baseline.py
 python3 python/golden/qkv_projection_baseline.py
+python3 python/analysis/roofline_model.py
 ```
 
 Windows / Vitis HLS 2020.2：
@@ -254,6 +263,62 @@ cosim_design -rtl verilog
 V2/V3 的顶层 `N/K/M` 来自指令字段，HLS 综合报告会给出非常保守的动态最坏 latency；当前性能分析主要看 V1 固定尺寸 scheduler 的 `47393183 cycles`。V2/V3 用 128 规模 RTL cosim 验证控制路径和 RTL 等价性，Verilog latency 分别为 `315251 cycles`。
 
 log11 的几个小实验说明：`TILE=14` 可以把 DSP 提到 196 个，接近 ZYNQ-7020 上限；A/B block 合并加载本身没有降低 latency；row banking=2 能把 128 规模 RTL latency 从 `381634` 降到 `317122`，但 LUT 超过器件容量；local A/B helper 合并方向反而让端口调度和 mux 更复杂，latency 变差到 `721602`。所以后续优化重点不是盲目加并行，而是平衡计算并行度、片上缓存 bank 和地址/控制逻辑。
+
+## 论文启发和内部 roofline
+
+结合 DianNao 和 FPGA'15 CNN accelerator 论文，我现在把性能问题拆成两层：
+
+```text
+外部 roofline:
+  DDR/AXI -> A_buf/B_buf/C_buf 的数据搬运是否限制整体吞吐。
+
+内部 roofline:
+  A_buf/B_buf/C_buf -> localA/localB/localC -> GEMM MAC 阵列是否喂得上。
+```
+
+当前阶段重点先看内部 roofline。原因是 O1 合并外层 A/B block load 没有降低 latency，而 O2 的 row banking/unroll=2 能降低 latency，说明瓶颈更像是片上 buffer 到 local tile 的喂数路径。
+
+`python/analysis/roofline_model.py` 会生成：
+
+```text
+reports/internal_roofline_points.csv
+reports/internal_roofline_summary.md
+```
+
+当前 O0-O5 的核心结果：
+
+| Case | attainable MAC/cycle | actual MAC/cycle | compute util | attainable util | latency/roof | 结论 |
+| --- | --- | --- | --- | --- | --- | --- |
+| O0 | 128.000 | 5.495 | 2.80% | 4.29% | 23.29x | 串行调度基线，internal/scheduler-bound |
+| O1 | 128.000 | 5.495 | 2.80% | 4.29% | 23.29x | A/B block 合并加载无收益 |
+| O2 | 128.000 | 6.613 | 3.37% | 5.17% | 19.36x | row banking 有收益，但 LUT 超额 |
+| O4/O5 | 128.000 | 2.906 | 1.48% | 2.27% | 44.04x | local A/B helper 合并方向退化 |
+
+这里的 `attainable MAC/cycle = min(compute roof, memory roof)`。在当前假设下，`compute roof = 196 MAC/cycle`，外部 DDR roof 约为 `128 MAC/cycle`，所以 attainable roof 是 `128 MAC/cycle`。O2 只有 `6.613 MAC/cycle`，说明当前不是先被 DDR 卡死，而是 PL 内部 scheduler/local feeding 明显没喂满 MAC 阵列。
+
+模型现在还额外输出：
+
+```text
+compute_roof_mac_per_cycle / compute_roof_ops_per_cycle
+mem_roof_mac_per_cycle / mem_roof_ops_per_cycle
+actual_mac_per_cycle / actual_ops_per_cycle
+roof_cycles_min
+latency_over_roof_lower_bound
+compute_peak_util
+attainable_roof_util
+local_model_gap
+total_model_gap
+GOPS/DSP, GOPS/BRAM18K, GOPS/kLUT
+```
+
+下一步优化按这个顺序推进：
+
+```text
+O6: full-block fast path，减少边界判断和 mux。
+O7: TILE/BLOCK/ROW_UNROLL 小型设计空间枚举。
+O8: 指令语义加入 reuse_A/reuse_B/accumulate_C/store_C。
+O9: 外部 DDR roofline 估算和后续上板带宽验证。
+```
 
 ## GEMM 并行规模 sweep
 

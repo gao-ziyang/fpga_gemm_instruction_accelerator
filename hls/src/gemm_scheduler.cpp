@@ -14,6 +14,10 @@
 #define GZY_ACCEL_LOCAL_AB_PARALLEL 0
 #endif
 
+#ifndef GZY_ACCEL_FULL_BLOCK_FAST
+#define GZY_ACCEL_FULL_BLOCK_FAST 0
+#endif
+
 static const int ACCEL_LOCAL_ROW_UNROLL = GZY_ACCEL_LOCAL_ROW_UNROLL;
 static const int ACCEL_LOAD_AB_COLS =
     (ACCEL_BLOCK_N > ACCEL_BLOCK_M) ? ACCEL_BLOCK_N : ACCEL_BLOCK_M;
@@ -117,6 +121,76 @@ load_ab_k:
     }
 }
 
+static void load_a_block_full(
+    gemm_data_t A_mem[ACCEL_A_ELEMS],
+    gemm_data_t A_buf[ACCEL_BLOCK_N][ACCEL_BLOCK_K],
+    int N,
+    int K,
+    int n0,
+    int k0,
+    int a_base
+) {
+#pragma HLS INLINE off
+load_a_full_i:
+    for (int i = 0; i < ACCEL_BLOCK_N; i++) {
+    load_a_full_k:
+        for (int k = 0; k < ACCEL_BLOCK_K; k++) {
+#pragma HLS PIPELINE II=1
+            A_buf[i][k] = A_mem[a_base + (n0 + i) * K + (k0 + k)];
+        }
+    }
+}
+
+static void load_b_block_full(
+    gemm_data_t B_mem[ACCEL_B_ELEMS],
+    gemm_data_t B_buf[ACCEL_BLOCK_K][ACCEL_BLOCK_M],
+    int K,
+    int M,
+    int k0,
+    int m0,
+    int b_base
+) {
+#pragma HLS INLINE off
+load_b_full_k:
+    for (int k = 0; k < ACCEL_BLOCK_K; k++) {
+    load_b_full_j:
+        for (int j = 0; j < ACCEL_BLOCK_M; j++) {
+#pragma HLS PIPELINE II=1
+            B_buf[k][j] = B_mem[b_base + (k0 + k) * M + (m0 + j)];
+        }
+    }
+}
+
+static void load_ab_block_full(
+    gemm_data_t A_mem[ACCEL_A_ELEMS],
+    gemm_data_t B_mem[ACCEL_B_ELEMS],
+    gemm_data_t A_buf[ACCEL_BLOCK_N][ACCEL_BLOCK_K],
+    gemm_data_t B_buf[ACCEL_BLOCK_K][ACCEL_BLOCK_M],
+    int N,
+    int K,
+    int M,
+    int n0,
+    int k0,
+    int m0,
+    int a_base,
+    int b_base
+) {
+#pragma HLS INLINE off
+load_ab_full_k:
+    for (int k = 0; k < ACCEL_BLOCK_K; k++) {
+    load_ab_full_x:
+        for (int x = 0; x < ACCEL_LOAD_AB_COLS; x++) {
+#pragma HLS PIPELINE II=1
+            if (x < ACCEL_BLOCK_N) {
+                A_buf[x][k] = A_mem[a_base + (n0 + x) * K + (k0 + k)];
+            }
+            if (x < ACCEL_BLOCK_M) {
+                B_buf[k][x] = B_mem[b_base + (k0 + k) * M + (m0 + x)];
+            }
+        }
+    }
+}
+
 static void load_local_ab_tile(
     gemm_data_t A_buf[ACCEL_BLOCK_N][ACCEL_BLOCK_K],
     gemm_data_t B_buf[ACCEL_BLOCK_K][ACCEL_BLOCK_M],
@@ -154,6 +228,101 @@ load_local_ab_row:
                 localB[r][x] = B_buf[bk][bj];
             } else {
                 localB[r][x] = 0;
+            }
+        }
+    }
+}
+
+static void compute_block_full(
+    gemm_data_t A_buf[ACCEL_BLOCK_N][ACCEL_BLOCK_K],
+    gemm_data_t B_buf[ACCEL_BLOCK_K][ACCEL_BLOCK_M],
+    gemm_acc_t C_buf[ACCEL_BLOCK_N][ACCEL_BLOCK_M],
+    bool reset_c
+) {
+#pragma HLS INLINE off
+compute_full_tile_i:
+    for (int ti = 0; ti < ACCEL_BLOCK_N; ti += GEMM_TILE) {
+    compute_full_tile_j:
+        for (int tj = 0; tj < ACCEL_BLOCK_M; tj += GEMM_TILE) {
+            gemm_acc_t localC[GEMM_TILE][GEMM_TILE];
+#pragma HLS ARRAY_PARTITION variable=localC complete dim=0
+
+        load_full_local_c_group:
+            for (int ii0 = 0; ii0 < GEMM_TILE; ii0 += ACCEL_LOCAL_ROW_UNROLL) {
+#pragma HLS PIPELINE II=1
+            load_full_local_c_u:
+                for (int u = 0; u < ACCEL_LOCAL_ROW_UNROLL; u++) {
+#pragma HLS UNROLL
+                    const int ii = ii0 + u;
+                load_full_local_c_j:
+                    for (int jj = 0; jj < GEMM_TILE; jj++) {
+#pragma HLS UNROLL
+                        if (ii < GEMM_TILE) {
+                            localC[ii][jj] = reset_c ? (gemm_acc_t)0 : C_buf[ti + ii][tj + jj];
+                        }
+                    }
+                }
+            }
+
+        compute_full_tile_k:
+            for (int tk = 0; tk < ACCEL_BLOCK_K; tk += GEMM_TILE) {
+                gemm_data_t localA[GEMM_TILE][GEMM_TILE];
+                gemm_data_t localB[GEMM_TILE][GEMM_TILE];
+#pragma HLS ARRAY_PARTITION variable=localA complete dim=0
+#pragma HLS ARRAY_PARTITION variable=localB complete dim=0
+
+            load_full_local_a_group:
+                for (int ii0 = 0; ii0 < GEMM_TILE; ii0 += ACCEL_LOCAL_ROW_UNROLL) {
+#pragma HLS PIPELINE II=1
+                load_full_local_a_u:
+                    for (int u = 0; u < ACCEL_LOCAL_ROW_UNROLL; u++) {
+#pragma HLS UNROLL
+                        const int ii = ii0 + u;
+                    load_full_local_a_k:
+                        for (int kk = 0; kk < GEMM_TILE; kk++) {
+#pragma HLS UNROLL
+                            if (ii < GEMM_TILE) {
+                                localA[ii][kk] = A_buf[ti + ii][tk + kk];
+                            }
+                        }
+                    }
+                }
+
+            load_full_local_b_group:
+                for (int kk0 = 0; kk0 < GEMM_TILE; kk0 += ACCEL_LOCAL_ROW_UNROLL) {
+#pragma HLS PIPELINE II=1
+                load_full_local_b_u:
+                    for (int u = 0; u < ACCEL_LOCAL_ROW_UNROLL; u++) {
+#pragma HLS UNROLL
+                        const int kk = kk0 + u;
+                    load_full_local_b_j:
+                        for (int jj = 0; jj < GEMM_TILE; jj++) {
+#pragma HLS UNROLL
+                            if (kk < GEMM_TILE) {
+                                localB[kk][jj] = B_buf[tk + kk][tj + jj];
+                            }
+                        }
+                    }
+                }
+
+                gemm_core_mac(localA, localB, localC);
+            }
+
+        store_full_local_c_group:
+            for (int ii0 = 0; ii0 < GEMM_TILE; ii0 += ACCEL_LOCAL_ROW_UNROLL) {
+#pragma HLS PIPELINE II=1
+            store_full_local_c_u:
+                for (int u = 0; u < ACCEL_LOCAL_ROW_UNROLL; u++) {
+#pragma HLS UNROLL
+                    const int ii = ii0 + u;
+                store_full_local_c_j:
+                    for (int jj = 0; jj < GEMM_TILE; jj++) {
+#pragma HLS UNROLL
+                        if (ii < GEMM_TILE) {
+                            C_buf[ti + ii][tj + jj] = localC[ii][jj];
+                        }
+                    }
+                }
             }
         }
     }
@@ -290,6 +459,26 @@ compute_tile_i:
     }
 }
 
+static void store_c_block_full(
+    gemm_acc_t C_mem[ACCEL_C_ELEMS],
+    gemm_acc_t C_buf[ACCEL_BLOCK_N][ACCEL_BLOCK_M],
+    int N,
+    int M,
+    int n0,
+    int m0,
+    int c_base
+) {
+#pragma HLS INLINE off
+store_c_full_i:
+    for (int i = 0; i < ACCEL_BLOCK_N; i++) {
+    store_c_full_j:
+        for (int j = 0; j < ACCEL_BLOCK_M; j++) {
+#pragma HLS PIPELINE II=1
+            C_mem[c_base + (n0 + i) * M + (m0 + j)] = C_buf[i][j];
+        }
+    }
+}
+
 static void store_c_block(
     gemm_acc_t C_mem[ACCEL_C_ELEMS],
     gemm_acc_t C_buf[ACCEL_BLOCK_N][ACCEL_BLOCK_M],
@@ -347,38 +536,76 @@ block_n_loop:
         for (int m0 = 0; m0 < M; m0 += ACCEL_BLOCK_M) {
             const int current_N = min_int(ACCEL_BLOCK_N, N - n0);
             const int current_M = min_int(ACCEL_BLOCK_M, M - m0);
+            const bool full_nm =
+                (current_N == ACCEL_BLOCK_N) && (current_M == ACCEL_BLOCK_M);
 
         block_k_loop:
             for (int k0 = 0; k0 < K; k0 += ACCEL_BLOCK_K) {
                 const int current_K = min_int(ACCEL_BLOCK_K, K - k0);
                 const bool reset_c = (k0 == 0);
+                const bool full_nmk = full_nm && (current_K == ACCEL_BLOCK_K);
 
+#if GZY_ACCEL_FULL_BLOCK_FAST
+                if (full_nmk) {
 #if GZY_ACCEL_LOAD_AB_PARALLEL
-                load_ab_block(
-                    A_mem,
-                    B_mem,
-                    A_buf,
-                    B_buf,
-                    N,
-                    K,
-                    M,
-                    n0,
-                    k0,
-                    m0,
-                    a_base,
-                    b_base,
-                    current_N,
-                    current_K,
-                    current_M
-                );
+                    load_ab_block_full(
+                        A_mem,
+                        B_mem,
+                        A_buf,
+                        B_buf,
+                        N,
+                        K,
+                        M,
+                        n0,
+                        k0,
+                        m0,
+                        a_base,
+                        b_base
+                    );
 #else
-                load_a_block(A_mem, A_buf, N, K, n0, k0, a_base, current_N, current_K);
-                load_b_block(B_mem, B_buf, K, M, k0, m0, b_base, current_K, current_M);
+                    load_a_block_full(A_mem, A_buf, N, K, n0, k0, a_base);
+                    load_b_block_full(B_mem, B_buf, K, M, k0, m0, b_base);
 #endif
-                compute_block(A_buf, B_buf, C_buf, current_N, current_K, current_M, reset_c);
+                    compute_block_full(A_buf, B_buf, C_buf, reset_c);
+                } else {
+#endif
+#if GZY_ACCEL_LOAD_AB_PARALLEL
+                    load_ab_block(
+                        A_mem,
+                        B_mem,
+                        A_buf,
+                        B_buf,
+                        N,
+                        K,
+                        M,
+                        n0,
+                        k0,
+                        m0,
+                        a_base,
+                        b_base,
+                        current_N,
+                        current_K,
+                        current_M
+                    );
+#else
+                    load_a_block(A_mem, A_buf, N, K, n0, k0, a_base, current_N, current_K);
+                    load_b_block(B_mem, B_buf, K, M, k0, m0, b_base, current_K, current_M);
+#endif
+                    compute_block(A_buf, B_buf, C_buf, current_N, current_K, current_M, reset_c);
+#if GZY_ACCEL_FULL_BLOCK_FAST
+                }
+#endif
             }
 
+#if GZY_ACCEL_FULL_BLOCK_FAST
+            if (full_nm) {
+                store_c_block_full(C_mem, C_buf, N, M, n0, m0, c_base);
+            } else {
+                store_c_block(C_mem, C_buf, N, M, n0, m0, c_base, current_N, current_M);
+            }
+#else
             store_c_block(C_mem, C_buf, N, M, n0, m0, c_base, current_N, current_M);
+#endif
         }
     }
 }

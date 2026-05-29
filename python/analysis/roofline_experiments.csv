@@ -1,0 +1,6 @@
+name,n,k,m,tile,block_n,block_k,block_m,row_unroll,latency_cycles,bram18k,dsp,ff,lut,estimated_clock_ns,note,c_traffic_mode,freq_mhz,ddr_mb_per_s,ddr_efficiency,axi_burst_bytes,axi_burst_latency_cycles,overlap_ext_load_compute,overlap_store_compute,local_ab_combined,local_a_ii,local_b_ii,local_ab_ii,local_c_read_ii,local_c_write_ii,compute_ii,pipeline_fill_drain_cycles,function_call_overhead_cycles,address_mux_overhead_per_output_tile,boundary_overhead_per_tail_output_tile,bram_conflict_penalty_per_output_tile
+O0,128,128,128,14,112,112,112,1,381634,56,196,33470,49206,7.218,serial block load baseline,write_only,100,800,1,64,0,0,0,0,1,1,1,1,1,1,0,0,0,0,0
+O1,128,128,128,14,112,112,112,1,381634,56,196,33282,49023,7.165,combined external A/B block load,write_only,100,800,1,64,0,0,0,0,1,1,1,1,1,1,0,0,0,0,0
+O2,128,128,128,14,112,112,112,2,317122,84,196,34317,67546,7.143,O1 plus row banking/unroll=2,write_only,100,800,1,64,0,0,0,0,1,1,1,1,1,1,0,0,0,0,0
+O4,128,128,128,14,112,112,112,1,721602,56,196,40296,83514,7.165,local A/B helper,write_only,100,800,1,64,0,0,0,1,1,1,7,1,1,1,0,0,0,0,0
+O5,128,128,128,14,112,112,112,1,721602,56,196,40296,83514,7.165,helper with formal buffer partition pragmas,write_only,100,800,1,64,0,0,0,1,1,1,7,1,1,1,0,0,0,0,0
