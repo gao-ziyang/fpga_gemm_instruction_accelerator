@@ -29,7 +29,12 @@ INT8 GEMM 微核
 11. 使用 `N=1024,K=1024,M=1024,TILE=12,BLOCK_N/K/M=96` 完成 V1/V2/V3 的 C-sim 和 C-synth。
 12. 使用 `N=128,K=128,M=128,TILE=12,BLOCK_N/K/M=96` 完成 V1/V2/V3 的 C/RTL cosim，用于验证 RTL 等价性。
 13. 完成 log11 scheduler 优化实验：64-bit 指令、`TILE=14`、`BLOCK_N/K/M=112`、A/B block 合并加载、local row banking=2、local A/B helper 等版本均完成 HLS 验证或综合记录。当前结论是 O2 有 latency 收益但 LUT 超额，O4/O5 功能正确但性能变差，后续应重点优化 bank/unroll 的资源代价和地址逻辑。
-14. 新增内部 roofline 分析脚本，将 O0-O5 的 HLS 结果转成 external traffic、CTC、actual MAC/cycle、DSP 有效利用率和 local feeding 模型，作为后续 O6/O7 优化前的分析基线。
+14. 新增内部 roofline 分析脚本，将 O0-O6 的 HLS 结果转成 external traffic、CTC、actual MAC/cycle、compute peak utilization 和 local feeding 模型，作为后续优化分析基线。
+15. 完成 O6 full-block fast path 验证：功能、综合、Verilog cosim 均通过，但 latency 没有改善，且 full/boundary 双路径导致 DSP/LUT 明显增加，因此该版本只作为反例记录；O2 仍是性能探索点，O1 仍是当前可落地 baseline。
+16. 完成 O7 row banking sweep 和 O4 inline/direct 对照：row banking=4/7 资源代价过高且 latency 退化；O4inline/O4_2 功能正确但 C-synth latency 退化到约 2979010 cycles，说明 local A/B helper 合并方向不适合继续作为落地路线。
+17. 完成 O6 补充版 full-only 编译期开关验证：`O1_224_generic` 把 `N/K/M` 作为顶层运行时输入，`O6c_fullonly_224` 仍用编译期 full-only；两边功能、综合、Verilog cosim 均通过。干净对照显示 generic 边界控制主要增加 LUT/FF，而不是显著增加当前 latency。
+18. 扩展 `roofline_model.py`，保留原有 internal roofline 输出，同时新增 `ideal_lower_bound_model` 和 `hls_loop_schedule_model`。新的 loop schedule 模型按当前 HLS C++ 的 `tripcount x II` 分解 latency，更适合解释 O1/O2/O4/O5 的实际差距。
+19. 完成 O8 local double buffer A1 最小实验：功能和 Verilog cosim 通过，但 `load_local_a_bank/load_local_b_bank` 的 Final II 退化到 7，LUT 增加到 `86755`，latency 退化到 `705730 cycles`，因此只作为失败反例记录。路线 D 只做了设计分析，没有直接大改。
 
 这里的 `*_top()` 都是 HLS 单元验证入口；以后真正给 `accelerator_top()` 调用的应该是 `gemm_tiled()`、`conv2d_gemm()`、`qkv_projection()`、`attention_core()` 这类 core 函数。
 
@@ -153,6 +158,11 @@ gzy_gemm_accel/
       run_hls_accel_log11_o3_scheduler.tcl
       run_hls_accel_log11_o4_scheduler.tcl
       run_hls_accel_log11_o5_scheduler.tcl
+      run_hls_accel_log13_o6_fastpath.tcl
+      run_hls_accel_log14_o7_row_unroll_sweep.tcl
+      run_hls_accel_log15_o4_inline_direct.tcl
+      run_hls_accel_log16_o6_full_only_224.tcl
+      run_hls_accel_log17_o8_local_double_buffer.tcl
   python/golden/
   python/analysis/
     roofline_model.py
@@ -169,6 +179,10 @@ gzy_gemm_accel/
     iteration_010_accelerator_v1_v2_v3.md
     iteration_011_scheduler_optimization.md
     iteration_012_internal_roofline_model.md
+    iteration_013_full_block_fast_path.md
+    iteration_014_o4_inline_direct.md
+    iteration_015_o6_full_only_224.md
+    iteration_016_o8_local_double_buffer.md
     teacher_feedback_roofline_next_plan.md
   reports/
     internal_roofline_points.csv
@@ -215,6 +229,11 @@ C:\xilinx\Vitis_HLS\2020.2\bin\vitis_hls.bat -f C:\Transformer\gzy_gemm_accel\hl
 C:\xilinx\Vitis_HLS\2020.2\bin\vitis_hls.bat -f C:\Transformer\gzy_gemm_accel\hls\scripts\run_hls_gemm_benchmark_sweep.tcl
 C:\xilinx\Vitis_HLS\2020.2\bin\vitis_hls.bat -f C:\Transformer\gzy_gemm_accel\hls\scripts\run_hls_accel_v123.tcl
 C:\xilinx\Vitis_HLS\2020.2\bin\vitis_hls.bat -f C:\Transformer\gzy_gemm_accel\hls\scripts\run_hls_accel_log11_opt.tcl
+C:\xilinx\Vitis_HLS\2020.2\bin\vitis_hls.bat -f C:\Transformer\gzy_gemm_accel\hls\scripts\run_hls_accel_log13_o6_fastpath.tcl
+C:\xilinx\Vitis_HLS\2020.2\bin\vitis_hls.bat -f C:\Transformer\gzy_gemm_accel\hls\scripts\run_hls_accel_log14_o7_row_unroll_sweep.tcl
+C:\xilinx\Vitis_HLS\2020.2\bin\vitis_hls.bat -f C:\Transformer\gzy_gemm_accel\hls\scripts\run_hls_accel_log15_o4_inline_direct.tcl
+C:\xilinx\Vitis_HLS\2020.2\bin\vitis_hls.bat -f C:\Transformer\gzy_gemm_accel\hls\scripts\run_hls_accel_log16_o6_full_only_224.tcl
+C:\xilinx\Vitis_HLS\2020.2\bin\vitis_hls.bat -f C:\Transformer\gzy_gemm_accel\hls\scripts\run_hls_accel_log17_o8_local_double_buffer.tcl
 ```
 
 常规单元脚本会依次执行：
@@ -239,6 +258,9 @@ cosim_design -rtl verilog
 | GEMM benchmark sweep | `A[16,96] x B[96,96]`, `TILE=4/8/12/14` | PASS | PASS | PASS | 0 | 0 | 101159936 |
 | Accelerator V1/V2/V3 large | `A[1024,1024] x B[1024,1024]`, `TILE=12,BLOCK=96` | PASS | PASS | 128 规模 PASS | 0 | 0 | 2087749971 |
 | Accelerator log11 O0/O1/O2/O5 | `A[128,128] x B[128,128]`, `TILE=14,BLOCK=112` | PASS | PASS | PASS | 0 | 0 | 35200361 |
+| Accelerator log15 O4inline/O4_2 | `A[128,128] x B[128,128]`, `TILE=14,BLOCK=112` | PASS | PASS | O4inline PASS，O4_2 未完整跑 | 0 | 0 | 35200361 |
+| Accelerator log16 O1 generic/O6 full-only | `A[224,224] x B[224,224]`, `TILE=14,BLOCK=112` | PASS | PASS | PASS | 0 | 0 | -159053159 |
+| Accelerator log17 O8 local double buffer A1 | `A[128,128] x B[128,128]`, `TILE=14,BLOCK=112` | PASS | PASS | PASS | 0 | 0 | 35200361 |
 
 ## 综合与 cosim 摘要
 
@@ -257,12 +279,20 @@ cosim_design -rtl verilog
 | log11 O1 loadAB | 56 | 196 | 33282 | 49023 | 7.165 ns | 381634 cycles |
 | log11 O2 loadAB+bank2 | 84 | 196 | 34317 | 67546 | 7.143 ns | 317122 cycles |
 | log11 O5 localAB helper | 56 | 196 | 40296 | 83514 | 7.165 ns | 721602 cycles |
+| log13 O6a full-block fast path | 56 | 392 | 62788 | 69099 | 7.218 ns | 381634 cycles |
+| log13 O6b full-block fast path + bank2 | 84 | 392 | 64184 | 134637 | 7.143 ns | 317186 cycles |
+| log14 O7a row bank4 | 224 | 196 | 42468 | 82719 | 7.246 ns | 330946 cycles |
+| log14 O7b row bank7 | 392 | 196 | 267912 | 193181 | 7.143 ns | 413890 cycles |
+| log15 O4inline helper | 56 | 196 | 43062 | 27623 | 7.165 ns | 2988226 cycles |
+| log16 O1 224 generic | 56 | 199 | 35271 | 51289 | 7.653 ns | 381879 cycles |
+| log16 O6c full-only 224 | 56 | 196 | 29822 | 19539 | 7.263 ns | 381634 cycles |
+| log17 O8a local double buffer A1 | 56 | 196 | 46991 | 86755 | 7.165 ns | 705730 cycles |
 
 `attention_top` 里 row-normalization 目前使用整数除法，HLS 生成了 `sdiv`，所以它是一个能跑通的第一版近似，不是最终资源优化版本。
 
 V2/V3 的顶层 `N/K/M` 来自指令字段，HLS 综合报告会给出非常保守的动态最坏 latency；当前性能分析主要看 V1 固定尺寸 scheduler 的 `47393183 cycles`。V2/V3 用 128 规模 RTL cosim 验证控制路径和 RTL 等价性，Verilog latency 分别为 `315251 cycles`。
 
-log11 的几个小实验说明：`TILE=14` 可以把 DSP 提到 196 个，接近 ZYNQ-7020 上限；A/B block 合并加载本身没有降低 latency；row banking=2 能把 128 规模 RTL latency 从 `381634` 降到 `317122`，但 LUT 超过器件容量；local A/B helper 合并方向反而让端口调度和 mux 更复杂，latency 变差到 `721602`。所以后续优化重点不是盲目加并行，而是平衡计算并行度、片上缓存 bank 和地址/控制逻辑。
+log11-log17 的几个小实验说明：`TILE=14` 可以把 DSP 提到 196 个，接近 ZYNQ-7020 上限；A/B block 合并加载本身没有降低 latency；row banking=2 能把 128 规模 RTL latency 从 `381634` 降到 `317122`，但 LUT 超过器件容量。O7 继续把 row banking 加到 4/7 后，BRAM/LUT 明显爆炸且 latency 退化，所以行方向 banking 不适合作为落地路线。local A/B helper 合并方向也已经收敛：O4/O5 慢，O4inline/O4_2 直接退化到约 `2979010` C-synth cycles。O6 full-only 证明编译期只保留 full path 是可行的；和 `O1_224_generic` 对比时，LUT 从 `51289` 降到 `19539`，说明边界/generic 控制对资源代价很大，但 latency 只从 `381879` 降到 `381634`。O8a 说明顺序 ping-pong local double buffer 没有形成 load/compute overlap，动态 bank helper 还让 local A/B load Final II 退化到 7，LUT 到 `86755`。当前性能瓶颈仍然主要在 block/tile 调度和 local feeding 没有重叠，后续优化重点不是盲目加 pragma，而是更谨慎地验证静态 ping-pong/dataflow 是否真的 overlap。
 
 ## 论文启发和内部 roofline
 
@@ -283,9 +313,30 @@ log11 的几个小实验说明：`TILE=14` 可以把 DSP 提到 196 个，接近
 ```text
 reports/internal_roofline_points.csv
 reports/internal_roofline_summary.md
+reports/ideal_lower_bound_points.csv
+reports/ideal_lower_bound_summary.md
+reports/hls_loop_schedule_points.csv
+reports/hls_loop_schedule_summary.md
+reports/combined_roofline_points.csv
+reports/combined_roofline_summary.md
 ```
 
-当前 O0-O5 的核心结果：
+现在我把模型分成三层来看：
+
+```text
+ideal_lower_bound_model
+  -> DDR 带宽下界 + 理想 compute + 理想 local 搬运
+  -> 只作为 optimistic lower bound，不预测 HLS latency
+
+hls_loop_schedule_model
+  -> 按当前 C++ loop tripcount x II 估算
+  -> 对应 T_load_AB_block + T_compute_block_internal + T_store_C_block + T_control
+
+internal_roofline_model
+  -> 保留旧的 roofline / CTC / resource-efficiency 口径
+```
+
+当前 O0-O5 的 roofline 核心结果：
 
 | Case | attainable MAC/cycle | actual MAC/cycle | compute util | attainable util | latency/roof | 结论 |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -295,6 +346,38 @@ reports/internal_roofline_summary.md
 | O4/O5 | 128.000 | 2.906 | 1.48% | 2.27% | 44.04x | local A/B helper 合并方向退化 |
 
 这里的 `attainable MAC/cycle = min(compute roof, memory roof)`。在当前假设下，`compute roof = 196 MAC/cycle`，外部 DDR roof 约为 `128 MAC/cycle`，所以 attainable roof 是 `128 MAC/cycle`。O2 只有 `6.613 MAC/cycle`，说明当前不是先被 DDR 卡死，而是 PL 内部 scheduler/local feeding 明显没喂满 MAC 阵列。
+
+## Latency 分解和各版本归类
+
+我现在采用下面这套更贴近当前 HLS 代码的分解：
+
+```text
+T_total
+  ~= T_load_AB_block
+   + T_compute_block_internal
+   + T_store_C_block
+   + T_control
+```
+
+其中 `T_load_AB_block` 对应 DDR/memory port 到 `A_buf/B_buf` 的大块加载循环；`T_compute_block_internal` 对应 `compute_block()` 里的 localC 读取、localA/localB 读取、`gemm_core_mac()` 和 localC 写回；`T_store_C_block` 对应 `C_buf -> C_mem`；剩下没有被 tripcount x II 解释掉的部分记作 `T_control`。这个模型不使用 tail block 的实际 `current_N/K/M` 去减少循环次数，因为当前 generic HLS 代码的循环上界仍然是 `ACCEL_BLOCK_N/K/M`。
+
+| Version | 图中主分类 | HLS loop model | HLS actual | T_control | ideal roof gap | deploy | 我的理解 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| O0 | `T_compute_block_internal` | 336896 | 381634 | 44738 | 23.29x | deployable | 串行/合并外部加载在当前规模差异不明显，主要仍卡在内部 local feeding。 |
+| O1 | `T_compute_block_internal` | 336896 | 381634 | 44738 | 23.29x | deployable | 当前 ZYNQ-7020 可落地 baseline，LUT=49023 未超过 53200。 |
+| O2 | `T_compute_block_internal` | 272384 | 317122 | 44738 | 19.36x | not deployable | row_unroll=2 降低 local load/store 时间，所以更快；但 LUT=67546 超过 53200，只能作为性能探索点。 |
+| O4 | `T_compute_block_internal` | 623616 | 721602 | 97986 | 44.04x | not deployable | local A/B helper 让每个 output tile 的 local 搬运变重，latency 和 LUT 都退化。 |
+| O5 | `T_compute_block_internal` | 623616 | 721602 | 97986 | 44.04x | not deployable | 加 helper buffer partition 没救回来，说明问题不是单纯 pragma 缺失。 |
+| O4inline | `T_control` | 623616 | 2988226 | 2364610 | 182.39x | deployable | 强制 inline 后 LUT 降了，但控制/调度开销极大，latency 失控，不适合作为路线。 |
+| O6a | `T_compute_block_internal` | 336896 | 381634 | 44738 | 23.29x | not deployable | runtime full/fallback 双路径一起综合，DSP/LUT 翻倍，没有 latency 收益。 |
+| O6b | `T_compute_block_internal` | 272384 | 317186 | 44802 | 19.36x | not deployable | 继承 O2 的 latency 收益，但又叠加 O6 双路径资源问题。 |
+| O1_224_generic | `T_compute_block_internal` | 336896 | 381879 | 44983 | 6.66x | deployable | 运行时 `N/K/M` generic 版本接近以后 DDR 场景，资源接近上限但仍未超过 LUT。 |
+| O6c_fullonly_224 | `T_compute_block_internal` | 336896 | 381634 | 44738 | 6.66x | deployable | full-only 大幅降低 LUT，但 latency 基本不变，说明边界判断主要是资源问题。 |
+| O7a | `T_load_AB_block` | 244736 | 330946 | 86210 | 20.20x | not deployable | row_unroll=4 继续降低内部 local 部分，但 BRAM/LUT 代价过高，外层 load 和控制变得更显眼。 |
+| O7b | `T_control` | 226304 | 413890 | 187586 | 25.26x | not deployable | row_unroll=7 资源和控制复杂度爆炸，latency 反而退化。 |
+| O8a | `T_compute_block_internal` | 1025024 | 705730 | -319294 | 43.07x | not deployable | 顺序 ping-pong local double buffer 没有 overlap，local A/B load II=7，local feeding 占比约 93.44%，latency 和 LUT 都退化。 |
+
+对照理想下界看，128 规模版本的 `ideal_roofline_cycles` 只有 `16384`，即使采用五阶段理想不 overlap 的 `ideal_no_overlap_cycles` 也只有 `82944`。O1 实际是 `381634`，约为理想 roofline 的 `23.29x`、五阶段理想的 `4.60x`。O8a 实际是 `705730`，约为理想 roofline 的 `43.07x`、五阶段理想的 `8.51x`，说明错误形态的 double buffer 会把 local feeding 问题放大。整体来看，当前主要差距不是“理论 MAC 数不够”，而是 HLS loop schedule 里 local load/store、block 级调度和控制没有被 dataflow/double buffer 隐藏。
 
 模型现在还额外输出：
 
@@ -314,11 +397,20 @@ GOPS/DSP, GOPS/BRAM18K, GOPS/kLUT
 下一步优化按这个顺序推进：
 
 ```text
-O6: full-block fast path，减少边界判断和 mux。
-O7: TILE/BLOCK/ROW_UNROLL 小型设计空间枚举。
-O8: 指令语义加入 reuse_A/reuse_B/accumulate_C/store_C。
-O9: 外部 DDR roofline 估算和后续上板带宽验证。
+O6: full-only 编译期路径已验证，记录为补充反例。
+O7: row banking sweep 已验证，行 banking 不作为落地路线。
+O8: local double buffer A1 已验证，作为失败反例记录。
+O9: 如果继续路线 A，应先尝试静态 ping/pong 或小规模局部 DATAFLOW，避免动态 bank index；一旦 LUT 超过 53200 就停止。
+O10: 路线 D 先保持设计分析和小规模 prototype，不在 `TILE=14,BLOCK=112` 上直接做完整 block-level DATAFLOW。
 ```
+
+## 路线 A/D 当前结论
+
+路线 A 的最小 O8a 已经说明：只加顺序 ping-pong buffer 不够，HLS 没有形成 load next 与 compute current 的真实 overlap；动态 `bank` 参数还会引入 mux 和端口冲突，把 local A/B load 的 Final II 推到 7。后续如果继续 A2，应该避免动态 bank index，优先尝试静态 ping/pong 函数或小规模局部 DATAFLOW，并且只在 report 明确显示 overlap 时才继续。
+
+路线 D 暂时只分析，不直接大改。当前可 overlap 的层级有三类：K tile 级 local load/compute overlap、K block 级 load next A/B block 与 compute current block、N/M block 级 load/compute/store overlap。`A_buf/B_buf` 跨 block 依赖较少，可以 ping-pong；`C_buf` 有跨 K block 的累加 RAW 依赖，必须等最后一个 K block 后才能 store，若做 block-level DATAFLOW 通常需要 C buffer ping-pong 或严格分阶段。
+
+资源上，O1 已经是 `56 BRAM18K / 49023 LUT`，完整复制 A/B/C block buffer 会明显增加 BRAM，DATAFLOW 控制、FIFO、mux 和边界逻辑还会推高 LUT。O8a 只加 local ping-pong helper 就到 `86755 LUT`，所以在 `TILE=14,BLOCK=112` 上直接做完整 D 路线大概率无法保持 `LUT<53200`。更合理的做法是先用小规模 prototype 验证 dataflow report，再决定是否移植到主配置。
 
 ## GEMM 并行规模 sweep
 

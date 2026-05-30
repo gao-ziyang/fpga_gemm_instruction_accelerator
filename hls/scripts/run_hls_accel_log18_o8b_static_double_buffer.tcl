@@ -1,5 +1,5 @@
-# Focused log11 O5 run: TILE=14, BLOCK=112, combined external A/B load,
-# local A/B helper with explicit buffer partition pragmas.
+# O8 route A A2 experiment:
+#   O1 baseline plus static ping/pong local buffers and local DATAFLOW regions.
 
 set script_dir [file normalize [file dirname [info script]]]
 set root_dir   [file normalize [file join $script_dir "../.."]]
@@ -10,10 +10,10 @@ set proj_parent [file join $root_dir "vitis_hls_project"]
 file mkdir $proj_parent
 cd $proj_parent
 
-set project_name "accel_log11_o5_tile14_localab_helper_part_128"
-set cflags [format "-I%s -I%s -DGZY_GEMM_TILE=14 -DGZY_GEMM_BLOCK_M=14 -DGZY_ACCEL_BLOCK_N=112 -DGZY_ACCEL_BLOCK_K=112 -DGZY_ACCEL_BLOCK_M=112 -DGZY_ACCEL_LOAD_AB_PARALLEL=1 -DGZY_ACCEL_LOCAL_ROW_UNROLL=1 -DGZY_ACCEL_LOCAL_AB_PARALLEL=1 -DGZY_ACCEL_LOCAL_AB_HELPER_INLINE=0 -DGZY_ACCEL_LOCAL_AB_HELPER_PARTITION=1 -DGZY_ACCEL_LOCAL_AB_DIRECT=0 -DGZY_ACCEL_FULL_BLOCK_FAST=0 -DGZY_ACCEL_MAX_N=128 -DGZY_ACCEL_MAX_K=128 -DGZY_ACCEL_MAX_M=128 -DGZY_ACCEL_BENCH_N=128 -DGZY_ACCEL_BENCH_K=128 -DGZY_ACCEL_BENCH_M=128" $src_dir $tb_dir]
+set cflags [format "-I%s -I%s -DGZY_GEMM_TILE=14 -DGZY_GEMM_BLOCK_M=14 -DGZY_ACCEL_BLOCK_N=112 -DGZY_ACCEL_BLOCK_K=112 -DGZY_ACCEL_BLOCK_M=112 -DGZY_ACCEL_LOAD_AB_PARALLEL=1 -DGZY_ACCEL_LOCAL_ROW_UNROLL=1 -DGZY_ACCEL_LOCAL_AB_PARALLEL=0 -DGZY_ACCEL_LOCAL_DOUBLE_BUFFER=2 -DGZY_ACCEL_DATAFLOW_BLOCK_OVERLAP=0 -DGZY_ACCEL_FULL_BLOCK_FAST=0 -DGZY_ACCEL_FULL_ONLY=0 -DGZY_ACCEL_MAX_N=128 -DGZY_ACCEL_MAX_K=128 -DGZY_ACCEL_MAX_M=128 -DGZY_ACCEL_BENCH_N=128 -DGZY_ACCEL_BENCH_K=128 -DGZY_ACCEL_BENCH_M=128" \
+    $src_dir $tb_dir]
 
-open_project -reset $project_name
+open_project -reset "accel_log18_o8b_static_double_buffer_128"
 set_top gemm_scheduler_top
 add_files -cflags $cflags [file join $src_dir "gemm_core.cpp"]
 add_files -cflags $cflags [file join $src_dir "gemm_scheduler.cpp"]
