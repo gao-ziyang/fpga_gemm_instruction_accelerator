@@ -21,6 +21,8 @@
 | O7a | 330946 | 16384.0 | 20.20x | 82944.0 | 3.99x |
 | O7b | 413890 | 16384.0 | 25.26x | 82944.0 | 4.99x |
 | O8a | 705730 | 16384.0 | 43.07x | 82944.0 | 8.51x |
+| O8b | 637122 | 16384.0 | 38.89x | 82944.0 | 7.68x |
+| O8c | 794306 | 16384.0 | 48.48x | 82944.0 | 9.58x |
 
 ## HLS loop schedule model
 
@@ -41,12 +43,14 @@
 | O7a | 100352 | 94208 | 50176 | 86210 | 244736 | 330946 | 1.35x | T_load_AB_block | not deployable |
 | O7b | 100352 | 75776 | 50176 | 187586 | 226304 | 413890 | 1.83x | T_control | not deployable |
 | O8a | 100352 | 874496 | 50176 | -319294 | 1025024 | 705730 | 0.69x | T_compute_block_internal | not deployable |
+| O8b | 100352 | 874496 | 50176 | -387902 | 1025024 | 637122 | 0.62x | T_compute_block_internal | deployable |
+| O8c | 100352 | 874496 | 50176 | -230718 | 1025024 | 794306 | 0.77x | T_compute_block_internal | not deployable |
 
 ## 结论
 
 1. 当前 HLS loop model 最接近实际的是 `O0`，model gap 约为 `1.13x`。
-2. local load/store 占每个 output tile 时间超过 50% 的版本有：O0(69.2%), O1(69.2%), O2(52.9%), O4(87.9%), O5(87.9%), O4inline(87.9%), O6a(69.2%), O6b(52.9%), O1_224_generic(69.2%), O6c_fullonly_224(69.2%), O8a(93.4%)。这说明主要问题不是 MAC 数量不够，而是 local feeding 没有被隐藏。
+2. local load/store 占每个 output tile 时间超过 50% 的版本有：O0(69.2%), O1(69.2%), O2(52.9%), O4(87.9%), O5(87.9%), O4inline(87.9%), O6a(69.2%), O6b(52.9%), O1_224_generic(69.2%), O6c_fullonly_224(69.2%), O8a(93.4%), O8b(93.4%), O8c(93.4%)。这说明主要问题不是 MAC 数量不够，而是 local feeding 没有被隐藏。
 3. O1/O2/O4/O5 的差异：O1 模型为 `336896` cycles；O2 通过 row_unroll=2 把模型降到 `272384` cycles；O4/O5 的 local A/B helper 让每个 output tile 的 local load 变重，模型升到 `623616` / `623616` cycles。
-4. LUT 超过 `53200` 的版本标记为 not deployable：O2, O4, O5, O6a, O6b, O7a, O7b, O8a。
+4. LUT 超过 `53200` 的版本标记为 not deployable：O2, O4, O5, O6a, O6b, O7a, O7b, O8a, O8c。
 5. O1 是当前 ZYNQ-7020 可落地 baseline：资源没有超过 LUT 上限，虽然 latency 还明显高于理想下界。
 6. O2 虽然更快，但 LUT=67546 超过 `53200`，只能作为性能探索点，不能作为当前落地版本。

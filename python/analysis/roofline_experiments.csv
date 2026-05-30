@@ -12,3 +12,5 @@ O6c_fullonly_224,224,224,224,14,112,112,112,1,381634,56,196,29822,19539,7.263,O6
 O7a,128,128,128,14,112,112,112,4,330946,224,196,42468,82719,7.246,O1 plus row banking/unroll=4,write_only,100,800,1,64,0,0,0,0,1,1,1,1,1,1,0,0,0,0,0
 O7b,128,128,128,14,112,112,112,7,413890,392,196,267912,193181,7.143,O1 plus row banking/unroll=7,write_only,100,800,1,64,0,0,0,0,1,1,1,1,1,1,0,0,0,0,0
 O8a,128,128,128,14,112,112,112,1,705730,56,196,46991,86755,7.165,local double buffer A1 sequential ping-pong local load II=7,write_only,100,800,1,64,0,0,0,0,7,7,1,1,1,1,0,0,0,0,0
+O8b,128,128,128,14,112,112,112,1,637122,56,196,56031,48029,7.165,local double buffer A2 static ping-pong no effective dataflow local load II=7,write_only,100,800,1,64,0,0,0,0,7,7,1,1,1,1,0,0,0,0,0
+O8c,128,128,128,14,112,112,112,1,794306,56,196,87153,85521,7.165,local double buffer A2 ktile dataflow csynth estimate cosim stopped local load II=7,write_only,100,800,1,64,0,0,0,0,7,7,1,1,1,1,0,0,0,0,0
