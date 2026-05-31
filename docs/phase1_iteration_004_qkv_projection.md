@@ -1,4 +1,4 @@
-# 迭代日志 004：加入 update_A，并用 GEMM 实现 QKV projection
+# Phase 1 / 迭代日志 004：加入 update_A，并用 GEMM 实现 QKV projection
 
 > 说明：这一篇记录的是当时的 QKV 学习版本，所以公式里还写了固定 `>> 8`。后来在迭代 007 里我把 GEMM core 改成只输出原始 INT32 累加值，Q/K/V 如果要继续参与 Attention GEMM，再由 `saturate_to_int8(x, shift)` 做可配置量化。
 

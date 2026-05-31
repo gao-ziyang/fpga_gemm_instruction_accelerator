@@ -33,9 +33,11 @@ FIGURE_DIR = REPORT_DIR / "figures"
 
 LUT_LIMIT = 53_200
 DSP_LIMIT = 220
-BRAM18_LIMIT_DEFAULT = 280
-BRAM18_LIMIT_CONSERVATIVE = 140
-BRAM18_BITS = 18_432
+# ZYNQ-7020 has 140 physical BRAM36K blocks, equivalently 280 BRAM18K blocks.
+BRAM36_LIMIT_ZYNQ7020 = 140
+BRAM18_LIMIT_ZYNQ7020 = BRAM36_LIMIT_ZYNQ7020 * 2
+BRAM18_BITS = 18_432 #表示单个BRAM18kbit容量 18 Kibit = 18 * 1024 = 18,432 bits
+BRAM36_BITS = BRAM18_BITS * 2
 DEFAULT_COMPACT_BLOCK_CANDIDATES = 3
 
 TILE_CANDIDATES = [4, 6, 7, 8, 10, 11, 12, 13, 14, 16]
@@ -72,7 +74,8 @@ class Architecture:
     runtime_full_generic_fallback: bool = False
     note: str = ""
 
-
+#对应一组完整测试点design point的设计参数，包含工作参数、架构选择以及内部的各个参数大小等
+#即workload + architecture + （tile + block_n/k/m + row_unroll ）+ bitwidth + DDR 参数
 @dataclass(frozen=True)
 class Design:
     workload: Workload
@@ -82,17 +85,23 @@ class Design:
     block_k: int
     block_m: int
     row_unroll: int
+    #下面几个基本固定~~
     col_unroll: int
     input_bits: int
     acc_bits: int
     output_bits: int
     freq_mhz: float
+    #~~
     ddr_mb_per_s: float
     ddr_efficiency: float
     axi_burst_bytes: int
     axi_burst_latency_cycles: int
 
 
+#roofline_experiments.csv中记录的就是MeasuredPoint，包含设计参数和测量指标（cycle、资源等），以及备注信息
+#表示“已经真实跑过 HLS 的一个实验点”。它不是模型预测点，而是实验记录点
+#roofline_experiments.csv为此前O1~版本得到的真实结果，包含设计参数（n、k、m、tile、block_n/k/m、row_unroll）和测量结果（latency_cycles、bram18k、dsp、ff、lut）以及备注信息。通过分析这些MeasuredPoint，可以得到不同设计选择对性能和资源的影响，从而为模型校准提供依据。
+#MeasuredPoint = 原始实验数据
 @dataclass
 class MeasuredPoint:
     name: str
@@ -111,7 +120,9 @@ class MeasuredPoint:
     lut: int
     note: str
 
-
+#Calibration 保存经验校准参数，包括行展开的gap和资源惩罚，以及一些特定架构特征的资源惩罚（如local AB combined、O8 local double buffer、runtime full/generic fallback等），以及一些备注信息。
+#用真实 HLS 实验点校准出来的模型修正参数”。由build_calibration函数根据读取的MeasuredPoint计算得到，并在模型中使用这些参数来调整理想模型的预测，使其更接近实际测量结果。
+#Calibration   = 从原始实验数据提炼出的模型参数
 @dataclass
 class Calibration:
     baseline_loop_gap: float = 1.13
@@ -128,7 +139,7 @@ class Calibration:
     generic_total_ff_penalty_224: float = 5_450.0
     notes: list[str] | None = None
 
-
+#若干种工作参数加载WORKLOADS
 WORKLOADS = [
     Workload("square_128", 128, 128, 128, "square", "Square GEMM 128"),
     Workload("square_224", 224, 224, 224, "square", "Square GEMM 224"),
@@ -143,7 +154,7 @@ WORKLOADS = [
     Workload("conv_196x27x32", 196, 27, 32, "cnn_im2col", "Larger im2col GEMM"),
 ]
 
-
+#7条架构路线影响ARCHITECTURES
 ARCHITECTURES = [
     Architecture(
         "generic_o1_like",
@@ -374,7 +385,7 @@ def generate_designs(
                                             block_k=block_k,
                                             block_m=block_m,
                                             row_unroll=row_unroll,
-                                            col_unroll=tile,
+                                            col_unroll=tile,#目前默认按照tile大小列展开，方便mac调用。
                                             input_bits=input_bits,
                                             acc_bits=32,
                                             output_bits=32,
@@ -505,13 +516,13 @@ def hls_loop_schedule(d: Design, cal: Calibration) -> dict[str, float | int]:
     tile_n = counts["tile_n"]
     tile_m = counts["tile_m"]
     tile_k = counts["tile_k"]
-
+#外部 load AB 的周期数估计：如果外部 AB combined，则每个 block 需要 load block_k * max(block_n, block_m) 的数据；否则需要 load block_n * block_k + block_k * block_m 的数据。总的 load AB 周期数为 n_blk * m_blk * k_blk * 每个 block 的 load 周期数。
     if d.arch.external_ab_combined:
         t_load_per_block = d.block_k * max(d.block_n, d.block_m)
     else:
         t_load_per_block = d.block_n * d.block_k + d.block_k * d.block_m
     t_load_ab_block = n_blk * m_blk * k_blk * t_load_per_block
-
+#内部 local feeding + MAC compute 的周期数估计：每个输出 tile 需要 local read C、tile_k 次 local load A/B（或 AB combined）和 MAC compute，以及 local write C。每个 block 内的输出 tile 数为 tile_n * tile_m，每个 block 的数量为 n_blk * m_blk * k_blk。
     local_a_ii, local_b_ii, local_ab_ii = local_iis(d)
     rows = ceil_div(d.tile, d.row_unroll)
     t_local_c_read = rows
@@ -546,7 +557,7 @@ def hls_loop_schedule(d: Design, cal: Calibration) -> dict[str, float | int]:
     t_compute_block_internal = n_blk * m_blk * k_blk * tile_n * tile_m * t_one_output_tile
     t_store_c_block = n_blk * m_blk * d.block_n * d.block_m
     t_total_no_overlap_base = t_load_ab_block + t_compute_block_internal + t_store_c_block
-
+#tail penalty 和 boundary check penalty的周期数估计：tail penalty 主要来自于 tail block 中的输出 tile 需要额外的周期数来处理不满 tile 的情况，估计为 tail_tile_count * tile_k * rows * boundary_mode_weight，其中 boundary_mode_weight 根据边界检查模式调整；boundary check penalty 来自于每个 block 内的输出 tile 都需要进行边界检查，估计为 (full_tile_count + tail_tile_count) * tile_k * 0.25 * boundary_mode_weight。
     boundary_mode_weight = {
         "none": 0.0,
         "outer_block_only": 0.4,
@@ -611,10 +622,10 @@ def hls_loop_schedule(d: Design, cal: Calibration) -> dict[str, float | int]:
 def brams_for_bank(words: int, bits: int) -> int:
     return max(1, ceil_div(words * bits, BRAM18_BITS))
 
-
+#BRAM 模型
 def bram_model(d: Design) -> dict[str, float | int]:
     row_factor = max(1, d.row_unroll)
-    a_col_banks = max(1, min(d.tile, d.block_k))
+    a_col_banks = max(1, min(d.tile, d.block_k))#abc分别消耗的bank数，已经考虑到了列的bank factor=14了，所以ab均*14倍，c乘以28倍
     b_col_banks = max(1, min(d.tile, d.block_m))
     c_col_banks = max(1, min(d.tile, d.block_m))
 
@@ -706,7 +717,7 @@ def split_generic_resource_penalty(d: Design, cal: Calibration) -> dict[str, flo
 def resource_model(d: Design, cal: Calibration, bram18_limit: int) -> dict[str, float | int | str]:
     bram = bram_model(d)
     macs_parallel = d.tile * d.tile
-    dsp_est = macs_parallel
+    dsp_est = macs_parallel#DSP 模型
     if d.input_bits > 8:
         dsp_est = macs_parallel
     if d.arch.runtime_full_generic_fallback:
@@ -764,15 +775,20 @@ def resource_model(d: Design, cal: Calibration, bram18_limit: int) -> dict[str, 
         lut_est += 1_000_000
         ff_est += 1_000_000
 
+    bram18_est = bram["bram18_est"]
+    bram36_equiv_est = safe_div(bram18_est, 2.0)
+    bram36_feasible = bram36_equiv_est <= BRAM36_LIMIT_ZYNQ7020
     resource_feasible = (
         lut_est <= LUT_LIMIT
         and dsp_est <= DSP_LIMIT
-        and bram["bram18_est"] <= bram18_limit
+        and bram18_est <= bram18_limit
     )
-    conservative_bram_feasible = bram["bram18_est"] <= BRAM18_LIMIT_CONSERVATIVE
     return {
         **bram,
         **generic,
+        "bram36_equiv_est": bram36_equiv_est,
+        "bram36_limit": BRAM36_LIMIT_ZYNQ7020,
+        "bram36_feasible": int(bram36_feasible),
         "dsp_est": dsp_est,
         "lut_est": lut_est,
         "ff_est": ff_est,
@@ -787,8 +803,7 @@ def resource_model(d: Design, cal: Calibration, bram18_limit: int) -> dict[str, 
         "dataflow_pingpong_lut_penalty": pingpong_lut,
         "dataflow_pingpong_ff_penalty": pingpong_ff,
         "resource_feasible": int(resource_feasible),
-        "bram_conservative_feasible": int(conservative_bram_feasible),
-        "resource_limit_reason": resource_limit_reason(lut_est, dsp_est, bram["bram18_est"], bram18_limit),
+        "resource_limit_reason": resource_limit_reason(lut_est, dsp_est, bram18_est, bram18_limit),
     }
 
 
@@ -825,7 +840,7 @@ def evaluate_design(d: Design, cal: Calibration, bram18_limit: int) -> dict[str,
     traffic = external_traffic(d)
     ideal = ideal_lower_bound(d)
     hls = hls_loop_schedule(d, cal)
-    resource = resource_model(d, cal, bram18_limit)
+    resource = resource_model(d, cal, bram18_limit)#LUT/FF 模型
 
     macs = w.n * w.k * w.m
     latency_est = hls["T_total_with_overlap"] if d.arch.dataflow_overlap or d.arch.block_pingpong_ab else hls["T_total_no_overlap"]
@@ -1046,9 +1061,19 @@ dataclass so new shapes can be added in one list.
 
 ## Resource models
 
-BRAM is modeled with both raw bits and banked BRAM18 estimates.  The banked
-estimate accounts for tile column banking and row_unroll banking.  For O1-like
-`tile=14, block=112, row_unroll=1`, the model reproduces:
+BRAM is modeled with both raw bits and banked BRAM18 estimates.  ZYNQ-7020 has
+`140` physical BRAM36K blocks, which is equivalent to `280` BRAM18K blocks.
+The script therefore compares `bram18_est` against a BRAM18K limit, and also
+reports `bram36_equiv_est = bram18_est / 2`.
+
+`BRAM18_BITS = 18_432` means one Xilinx BRAM18 stores 18 Kibit:
+
+```text
+18 * 1024 = 18,432 bits
+```
+
+The banked estimate accounts for tile column banking and row_unroll banking.
+For O1-like `tile=14, block=112, row_unroll=1`, the model reproduces:
 
 ```text
 A_buf = 14 BRAM18K
@@ -1057,7 +1082,12 @@ C_buf = 28 BRAM18K
 total = 56 BRAM18K
 ```
 
-BRAM limit used for `resource_feasible`: `{bram18_limit}`.
+This is `28` BRAM36K-equivalent blocks.  The `TILE=14` column banking is already
+included: A has 14 banks, B has 14 banks, and C has 14 banks with 2 BRAM18K per
+bank because C stores INT32 accumulators.
+
+BRAM18K limit used for `resource_feasible`: `{bram18_limit}`.
+Equivalent BRAM36K physical limit: `{BRAM36_LIMIT_ZYNQ7020}`.
 Compact block scan: `{compact}`.
 Compact block candidates per dimension: `{compact_block_candidates}` when
 compact scan is enabled.  Use `--full-block-scan` for the full fixed block list.
@@ -1733,14 +1763,24 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_COMPACT_BLOCK_CANDIDATES,
         help="number of scored block candidates per N/K/M dimension in compact mode",
     )
-    parser.add_argument("--conservative-bram", action="store_true", help="use BRAM18 limit 140 instead of 280")
+    parser.add_argument(
+        "--bram18-limit",
+        type=int,
+        default=BRAM18_LIMIT_ZYNQ7020,
+        help="BRAM18K resource limit; ZYNQ-7020 default is 280, equivalent to 140 BRAM36K",
+    )
+    parser.add_argument(
+        "--conservative-bram",
+        action="store_true",
+        help="deprecated compatibility flag; no longer halves the BRAM18K limit",
+    )
     parser.add_argument("--no-figures", action="store_true", help="skip matplotlib figure generation")
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
-    bram18_limit = BRAM18_LIMIT_CONSERVATIVE if args.conservative_bram else BRAM18_LIMIT_DEFAULT
+    bram18_limit = args.bram18_limit
     measured = read_measured_points(EXPERIMENTS_CSV)
     cal = build_calibration(measured)
 

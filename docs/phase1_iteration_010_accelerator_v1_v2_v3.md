@@ -1,4 +1,4 @@
-# Iteration 010：先不管 AXI，把 GEMM core、scheduler、指令解码和 accelerator_top 跑通
+# Phase 1 / Iteration 010：先不管 AXI，把 GEMM core、scheduler、指令解码和 accelerator_top 跑通
 
 ## 我这一版想解决什么
 

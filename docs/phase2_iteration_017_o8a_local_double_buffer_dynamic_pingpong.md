@@ -1,4 +1,4 @@
-# Iteration 016: O8 local double buffer A1
+# Phase 2 / Iteration 017：O8a local double buffer A1，动态 ping-pong
 
 这次只做路线 A 的最小实验，不动 O1 baseline，也不直接实现路线 D 的 block-level DATAFLOW。
 

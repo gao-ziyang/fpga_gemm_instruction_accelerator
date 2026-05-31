@@ -1,4 +1,4 @@
-# 迭代日志 008：去掉 Conv2D 里的大矩阵初始化
+# Phase 1 / 迭代日志 008：去掉 Conv2D 里的大矩阵初始化
 
 ## 我这一版想解决什么
 
@@ -63,7 +63,7 @@ reshape
 | `hls/tb/tb_conv.cpp` | testbench 也改成 flat input/weight/output，并保留多维打印和 golden reference。 |
 | `README_conv.md` | 补充 Conv 初始化优化说明和最新验证结果。 |
 | `README.md` | 更新 `conv_top` 的综合和 cosim 摘要。 |
-| `docs/iteration_008_conv_init_optimization.md` | 记录这次定位和优化过程。 |
+| `docs/phase1_iteration_008_conv_init_optimization.md` | 记录这次定位和优化过程。 |
 
 代码里仍然保留：
 

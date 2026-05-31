@@ -1,4 +1,4 @@
-# Iteration 018: Route D block-level DATAFLOW design analysis
+# Phase 2 / Iteration 019：Route D block-level DATAFLOW 静态分析
 
 这次不继续优化 O8，也不在 `TILE=14/BLOCK=112` 主线里直接实现完整 DATAFLOW。O8b/O8c 已经给出一个很重要的边界结论：在当前 complete-partition local tile 和 ZYNQ-7020 LUT<53200 的约束下，不能靠 `helper/DATAFLOW over local arrays` 实现可落地的 local double buffering。
 
@@ -204,3 +204,143 @@ BLOCK_N/K/M=112
 | D | 暂不实现主线 | 只做静态分析或小规模 prototype |
 
 这不是坏结果。现在已经排除了几条看起来合理、但在 ZYNQ-7020 上不落地的路线。后续报告里应该明确写：O1 是当前可落地版本；O2/O8 是解释瓶颈和探索上限的证据；路线 D 需要先小规模验证 HLS dataflow report，不能贸然进入主配置。
+
+## 补充思考：失败不只是 LUT 不够
+
+这几轮实验之后，我觉得需要把“资源不够”和“调度失效”分开讲。
+
+`O2` 更像资源不够：row banking=2 / row_unroll=2 的方向确实让 latency 从 `381634 cycles` 降到 `317122 cycles`，说明多读一行 local 数据对 scheduler 有帮助。但是它的 LUT 到 `67546`，超过 ZYNQ-7020 的 `53200` 上限，所以只能作为性能探索点。
+
+`O3/O4/O5/O8` 更像调度失效：这些优化的本意是增加并行或者做 overlap，但 HLS 没有把关键 loop 调成更好的 II=1 流水，反而因为端口冲突、bank 选择、地址 mux、边界判断和 helper/task 边界，把 Final II 或控制开销放大。所以即使不考虑 ZYNQ-7020 的 LUT 上限，这些写法也不一定会变快。它们不是“更快但资源爆”，而是“资源可能变多，latency 也变差”。
+
+这个结论比单纯说 LUT 余量小更本质：
+
+```text
+O2:
+  方向有效，但资源超预算。
+
+O3/O4/O5:
+  local A/B 从串行 load 改成硬合并并行 load，
+  但 A_buf/B_buf 的 banking、索引方向和边界判断太复杂，
+  HLS 为了调度同一个 pipeline loop 生成大量 mux/依赖判断，
+  Final II 变大，latency 反而爆炸。
+
+O8:
+  想让 local A/B load 和 compute overlap，
+  但 complete-partition localA/localB 是大量寄存器标量。
+  一旦把这些数组跨 helper/DATAFLOW task 传递，
+  HLS 会插入很多 FIFO、mux 和控制逻辑。
+  结果不是理想的 load next + compute current，而是调度和连接成本超过收益。
+
+D:
+  block-level load/compute/store overlap 理论上更合理，
+  但完整版本基本需要 A/B/C block buffer ping-pong。
+  主配置下 BRAM 可能还能承受，LUT 和控制复杂度更危险；
+  更重要的是，它仍要通过 report 证明真的形成 overlap，不能只靠公式假设。
+```
+
+所以我现在更准确的判断是：当前 O1 是一个调度相对稳定的点，`gemm_core_mac()` 仍能保持 196 MAC 阵列和 II=1 的核心计算；继续在这个中心化 scheduler 上局部叠加并行 local load 或 DATAFLOW helper，很容易破坏 HLS 的 pipeline II。
+
+## 真正保留下来的优化
+
+目前只有两类优化值得保留。
+
+第一类是 `O1` 的 A/B block 合并加载。它把原来类似：
+
+```text
+load A block
+load B block
+```
+
+改成：
+
+```text
+load_ab_block
+```
+
+在 `N=K=M=128, BLOCK=112` 下，`n_blk*m_blk*k_blk = 8`。模型上相当于每个 block 组合从：
+
+```text
+112*112 + 112*112 cycles
+```
+
+压到大约：
+
+```text
+112*112 cycles
+```
+
+所以理论上节省约：
+
+```text
+8 * 112 * 112 = 100352 cycles
+```
+
+后面的 O1/O2/O4/O5/O6/O7/O8 主实验基本都保留了这个方向。但是它没有改变 `compute_block()` 内部的 local feeding，所以整体瓶颈仍在 `T_compute_block_internal`，不是外层 A/B block load。
+
+第二类是 `O6c full-only` 的编译期版本。如果后续可以保证 `N/K/M` 都是 block 的整数倍，就可以用：
+
+```cpp
+#if GZY_ACCEL_FULL_ONLY
+    full_only_path();
+#else
+    generic_path();
+#endif
+```
+
+只综合一套 full-only 硬件，去掉 tail boundary check、补零逻辑、地址 mux 和 fallback path。这个方向主要节省 LUT/FF，对 latency 的改善在当前 224 对照中不明显，但对资源很有价值。需要注意的是，`O6a` 那种 runtime full/generic 双路径不是成功路线，因为 HLS 容易同时保留两套 datapath，导致 DSP/LUT 暴涨。
+
+## 和参考工程的差距
+
+`gemm_hls_ref` 的结构和我当前代码最大的区别，不是有没有 partition，而是 partition 放在哪一层。
+
+我的结构是中心化 tile engine：
+
+```text
+A_mem/B_mem
+  -> A_buf/B_buf/C_buf
+  -> localA/localB/localC complete-partition register tile
+  -> gemm_core_mac 196-MAC array
+```
+
+参考工程是 stream-based systolic PE 架构：
+
+```text
+ReadA/ReadB
+  -> stream packet
+  -> PE0 -> PE1 -> PE2 -> ...
+  -> WriteC
+```
+
+它的 PE 内部有 `aBuffer`、`cBuffer` 和局部 unroll/partition；跨 DATAFLOW task 传的是 `Stream<ComputePackN_t>`、`Stream<ComputePackM_t>` 这种 packet，而不是完整二维 local tile。也就是说，它把类似 complete partition 的东西限制在 PE 内部，task 之间只传流式数据。
+
+我这版 O8 则把 `localA[14][14]`、`localB[14][14]` 这种 complete-partition 后的二维 register array 拿去做 helper/DATAFLOW 边界。HLS 需要为几百个标量寄存器生成连接、同步和选择逻辑，这和参考工程的 stream packet 不是一个层级的问题。
+
+因此，参考工程能自然做 double buffering，是因为它从一开始就是 PE + stream + systolic dataflow 架构；我的当前结构是 block buffer + local tile + 大 MAC 阵列，适合保守顺序 scheduler，不适合继续用局部 helper 去强行模拟 systolic overlap。
+
+## 可以向老师汇报的收敛结论
+
+我现在可以把 Phase 2 的结论收束成这样：
+
+```text
+1. O1 是当前 ZYNQ-7020 可落地 baseline。
+   LUT=49023，DSP=196，latency=381634。
+
+2. O2 证明 row banking=2 有性能收益，但 LUT=67546 超预算。
+   它是性能探索点，不是落地版本。
+
+3. O3/O4/O5 证明硬合并 local A/B load 在当前结构下不适合。
+   问题不只是资源，而是 pipeline II 和调度复杂度变差。
+
+4. O6 证明 runtime full/generic 双路径不可行；
+   但 O6c compile-time full-only 对对齐输入有资源价值。
+
+5. O8 证明 local double buffering 思路本身有意义，
+   但当前 helper/DATAFLOW over complete-partition local arrays 的写法不可落地。
+
+6. 路线 D 的完整 block-level DATAFLOW 理论上能 overlap load/compute/store，
+   但在主配置下大概率需要 A/B/C ping-pong 和额外控制逻辑；
+   当前不直接实现，只保留小规模 prototype 作为后续验证题。
+```
+
+这说明这一周不是没有结果，而是把几条直觉上看起来合理的优化路线用 HLS report 排除了。当前架构已经接近一个局部稳定点；如果后续还要明显突破 O1，就不是继续堆 pragma，而是要考虑从 stream/PE/systolic 的数据流架构重新设计。

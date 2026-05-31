@@ -1,4 +1,4 @@
-# Iteration 017: O8 A2 local double buffer
+# Phase 2 / Iteration 018：O8b/O8c local double buffer A2，静态 ping-pong 和 ktile DATAFLOW
 
 这次接着 O8a 往路线 A 走一步，尝试让 local double buffer 不只是顺序 ping-pong，而是用更静态的 ping/pong buffer 和局部 DATAFLOW 去靠近 `load next + compute current` 的重叠。
 

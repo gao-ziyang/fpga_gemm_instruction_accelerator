@@ -1,4 +1,4 @@
-# Iteration 013：O6 full-block fast path 验证
+# Phase 2 / Iteration 014：O6 runtime full-block fast path 验证
 
 ## 我这一版想解决什么
 
@@ -158,4 +158,3 @@ O6 这条路跑通了，但不是一个好优化。
 ```
 
 所以这一轮我会暂时停止沿 O6 继续加码。当前最好点仍然是 O2：`row_unroll=2` 有明确 latency 收益，但资源效率下降。下一步更应该围绕 O2 做更细的 bank/unroll sweep，或者从数据流层面考虑 double buffering / load-compute overlap，而不是继续复制一套 full path。
-

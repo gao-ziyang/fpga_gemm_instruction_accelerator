@@ -1,6 +1,9 @@
 # Local Vitis/Vivado GUI projects and generated files.
 # The source of truth is hls/src, hls/tb, hls/scripts, python, docs.
 vitis_hls_project/
+vivado_board/
+vivado_project/
+vitis_ws/
 
 # Fine-grained patterns kept for future variants if a project folder is tracked.
 vitis_hls_project/**/solution*/csim/
@@ -25,3 +28,8 @@ __pycache__/
 # Generated data can be recreated
 tests/data/*.bin
 tests/data/*.csv
+
+# Generated analysis/report outputs. Keep source/input CSVs such as
+# python/analysis/roofline_experiments.csv tracked; report CSVs are reproducible.
+reports/**/*.csv
+reports/**/figures/

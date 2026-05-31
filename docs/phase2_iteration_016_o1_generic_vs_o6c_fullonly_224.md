@@ -1,4 +1,4 @@
-# Iteration 015：O6 full-only 编译期开关验证
+# Phase 2 / Iteration 016：O1_224_generic vs O6c_fullonly_224 编译期 full-only 验证
 
 ## 我这一版想解决什么
 

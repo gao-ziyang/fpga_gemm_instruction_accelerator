@@ -1,4 +1,4 @@
-# Iteration 014：O7 结论收敛，以及 O4 inline/direct 对照
+# Phase 2 / Iteration 015：O7 row banking sweep，以及 O4 inline/direct 对照
 
 ## 我这一版想解决什么
 

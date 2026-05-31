@@ -28,7 +28,7 @@ INT8 GEMM 微核
 10. 新增非 AXI 版系统验证路径：`gemm_core_mac -> gemm_scheduler -> instruction/decode -> accelerator_top`。
 11. 使用 `N=1024,K=1024,M=1024,TILE=12,BLOCK_N/K/M=96` 完成 V1/V2/V3 的 C-sim 和 C-synth。
 12. 使用 `N=128,K=128,M=128,TILE=12,BLOCK_N/K/M=96` 完成 V1/V2/V3 的 C/RTL cosim，用于验证 RTL 等价性。
-13. 完成 log11 scheduler 优化实验：64-bit 指令、`TILE=14`、`BLOCK_N/K/M=112`、A/B block 合并加载、local row banking=2、local A/B helper 等版本均完成 HLS 验证或综合记录。当前结论是 O2 有 latency 收益但 LUT 超额，O4/O5 功能正确但性能变差，后续应重点优化 bank/unroll 的资源代价和地址逻辑。
+13. 完成 log11 scheduler 优化实验：64-bit 指令、`TILE=14`、`BLOCK_N/K/M=112`、A/B block 合并加载、local row banking=2、local A/B helper 等版本均完成 HLS 验证或综合记录。当前结论是 O1 作为可落地 baseline，O2 有 latency 收益但 LUT 超额，O4/O5 功能正确但性能变差，硬合并 local A/B load 不适合作为主线。
 14. 新增内部 roofline 分析脚本，将 O0-O6 的 HLS 结果转成 external traffic、CTC、actual MAC/cycle、compute peak utilization 和 local feeding 模型，作为后续优化分析基线。
 15. 完成 O6 full-block fast path 验证：功能、综合、Verilog cosim 均通过，但 latency 没有改善，且 full/boundary 双路径导致 DSP/LUT 明显增加，因此该版本只作为反例记录；O2 仍是性能探索点，O1 仍是当前可落地 baseline。
 16. 完成 O7 row banking sweep 和 O4 inline/direct 对照：row banking=4/7 资源代价过高且 latency 退化；O4inline/O4_2 功能正确但 C-synth latency 退化到约 2979010 cycles，说明 local A/B helper 合并方向不适合继续作为落地路线。
@@ -38,6 +38,24 @@ INT8 GEMM 微核
 20. 完成路线 D 的 block-level DATAFLOW 静态分析：完整 load/compute/store overlap 基本需要 A/B/C block buffer ping-pong，BRAM 从 56 估计到 112，但 O1 只剩约 4177 LUT 余量，DATAFLOW 控制和 bank mux 很可能让主配置超过 LUT 上限。因此 D 不直接进入 `TILE=14/BLOCK=112` 主线，只允许后续用小规模配置验证 HLS DATAFLOW report。
 
 这里的 `*_top()` 都是 HLS 单元验证入口；以后真正给 `accelerator_top()` 调用的应该是 `gemm_tiled()`、`conv2d_gemm()`、`qkv_projection()`、`attention_core()` 这类 core 函数。
+
+## 迭代日志阶段划分
+
+`docs/` 里的日志现在按三个阶段命名：
+
+```text
+phase1_iteration_001-010:
+  功能路径和系统骨架阶段。重点是把 GEMM、Conv、Attention、scheduler、指令译码和非 AXI accelerator_top 跑通。
+
+phase2_iteration_011-019:
+  资源-带宽-并行度权衡阶段。文件名里尽量保留 O 编号和优化意图，重点是围绕 ZYNQ-7020 的 LUT/DSP/BRAM 约束分析 TILE=14/BLOCK=112 的 scheduler 优化、roofline 模型、full-only、row banking、local double buffer 和路线 D。
+
+phase3_iteration_020-:
+  上板闭环阶段。先把 accelerator_top_axi、AXI-Lite 控制、AXI master 访问 DDR、Vivado block design 和 Vitis PS 端 main.c 跑通。第一次只跑 GEMM 指令和 END 指令，不加入 Conv/Attention。
+```
+
+Phase 2 的入口是 `phase2_iteration_012_teacher_feedback_roofline_next_plan.md`。它记录了我从“功能能跑”转向“计算并行度、片上缓存容量、片外访存带宽三者权衡”的理解。
+Phase 3 的入口是 `phase3_iteration_020_board_bringup_plan.md`。它记录第一次上板只验证 PS-PL-DDR-GEMM 闭环，并明确 PS 负责生成指令流、PL 负责 decode/dispatch。
 
 ## 当前核心参数
 
@@ -170,25 +188,26 @@ gzy_gemm_accel/
   python/analysis/
     roofline_model.py
   docs/
-    iteration_001_minimal_gemm.md
-    iteration_002_tiled_gemm.md
-    iteration_003_buffer_boundary_quant.md
-    iteration_004_qkv_projection.md
-    iteration_005_conv2d_gemm.md
-    iteration_006_attention.md
-    iteration_007_expand_16_96_96.md
-    iteration_008_conv_init_optimization.md
-    iteration_009_gemm_benchmark_sweep.md
-    iteration_010_accelerator_v1_v2_v3.md
-    iteration_011_scheduler_optimization.md
-    iteration_012_internal_roofline_model.md
-    iteration_013_full_block_fast_path.md
-    iteration_014_o4_inline_direct.md
-    iteration_015_o6_full_only_224.md
-    iteration_016_o8_local_double_buffer.md
-    iteration_017_o8_a2_double_buffer.md
-    iteration_018_route_d_design_analysis.md
-    teacher_feedback_roofline_next_plan.md
+    phase1_iteration_001_minimal_gemm.md
+    phase1_iteration_002_tiled_gemm.md
+    phase1_iteration_003_buffer_boundary_quant.md
+    phase1_iteration_004_qkv_projection.md
+    phase1_iteration_005_conv2d_gemm.md
+    phase1_iteration_006_attention.md
+    phase1_iteration_007_expand_16_96_96.md
+    phase1_iteration_008_conv_init_optimization.md
+    phase1_iteration_009_gemm_benchmark_sweep.md
+    phase1_iteration_010_accelerator_v1_v2_v3.md
+    phase2_iteration_011_o0_o5_scheduler_loadab_rowbank_localab.md
+    phase2_iteration_012_teacher_feedback_roofline_next_plan.md
+    phase2_iteration_013_o0_o5_internal_roofline_loop_model.md
+    phase2_iteration_014_o6_runtime_full_block_fast_path.md
+    phase2_iteration_015_o7_row_banking_sweep_o4_inline_direct.md
+    phase2_iteration_016_o1_generic_vs_o6c_fullonly_224.md
+    phase2_iteration_017_o8a_local_double_buffer_dynamic_pingpong.md
+    phase2_iteration_018_o8b_o8c_local_double_buffer_static_dataflow.md
+    phase2_iteration_019_routeD_block_level_dataflow_analysis.md
+    phase3_iteration_020_board_bringup_plan.md
   reports/
     internal_roofline_points.csv
     internal_roofline_summary.md
@@ -302,7 +321,7 @@ cosim_design -rtl verilog
 
 V2/V3 的顶层 `N/K/M` 来自指令字段，HLS 综合报告会给出非常保守的动态最坏 latency；当前性能分析主要看 V1 固定尺寸 scheduler 的 `47393183 cycles`。V2/V3 用 128 规模 RTL cosim 验证控制路径和 RTL 等价性，Verilog latency 分别为 `315251 cycles`。
 
-log11-log19 的几个小实验说明：`TILE=14` 可以把 DSP 提到 196 个，接近 ZYNQ-7020 上限；A/B block 合并加载本身没有降低 latency；row banking=2 能把 128 规模 RTL latency 从 `381634` 降到 `317122`，但 LUT 超过器件容量。O7 继续把 row banking 加到 4/7 后，BRAM/LUT 明显爆炸且 latency 退化，所以行方向 banking 不适合作为落地路线。local A/B helper 合并方向也已经收敛：O4/O5 慢，O4inline/O4_2 直接退化到约 `2979010` C-synth cycles。O6 full-only 证明编译期只保留 full path 是可行的；和 `O1_224_generic` 对比时，LUT 从 `51289` 降到 `19539`，说明边界/generic 控制对资源代价很大，但 latency 只从 `381879` 降到 `381634`。O8a 说明顺序 ping-pong local double buffer 没有形成 load/compute overlap，动态 bank helper 还让 local A/B load Final II 退化到 7，LUT 到 `86755`。O8b 改成静态 ping/pong 后 LUT 回到 `48029`，但 latency 仍退化到 `637122`；O8c 的函数级 DATAFLOW 确实被 HLS 接受，但单个 dataflow helper 就有大量 FIFO，top LUT 到 `85521`。当前性能瓶颈仍然主要在 block/tile 调度和 local feeding 没有重叠；double buffering 思路有意义，但当前 helper/DATAFLOW over array 的写法不适合作为可落地路线。
+log11-log19 的几个小实验说明：`TILE=14` 可以把 DSP 提到 196 个，接近 ZYNQ-7020 上限；A/B block 合并加载在模型上减少了外层 block load cycles，`N=K=M=128,BLOCK=112` 时理论节省约 `8*112*112=100352 cycles`，所以后续版本默认保留这个结构，但整体瓶颈仍不在这里。row banking=2 能把 128 规模 RTL latency 从 `381634` 降到 `317122`，但 LUT 超过器件容量。O7 继续把 row banking 加到 4/7 后，BRAM/LUT 明显爆炸且 latency 退化，所以高倍数行 banking 不适合作为落地路线。local A/B helper 合并方向也已经收敛：O4/O5 慢，O4inline/O4_2 直接退化到约 `2979010` C-synth cycles。O6 full-only 证明编译期只保留 full path 是可行的；和 `O1_224_generic` 对比时，LUT 从 `51289` 降到 `19539`，说明边界/generic 控制对资源代价很大，但 latency 只从 `381879` 降到 `381634`。O8a 说明顺序 ping-pong local double buffer 没有形成 load/compute overlap，动态 bank helper 还让 local A/B load Final II 退化到 7，LUT 到 `86755`。O8b 改成静态 ping/pong 后 LUT 回到 `48029`，但 latency 仍退化到 `637122`；O8c 的函数级 DATAFLOW 确实被 HLS 接受，但单个 dataflow helper 就有大量 FIFO，top LUT 到 `85521`。当前性能瓶颈仍然主要在 block/tile 调度和 local feeding 没有重叠；double buffering 思路有意义，但当前 helper/DATAFLOW over array 的写法不适合作为可落地路线。
 
 ## 论文启发和内部 roofline
 

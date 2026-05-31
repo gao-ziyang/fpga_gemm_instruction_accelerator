@@ -1,4 +1,4 @@
-# 迭代日志 006：补 Transformer Attention 的核心矩阵流
+# Phase 1 / 迭代日志 006：补 Transformer Attention 的核心矩阵流
 
 ## 我这一版想解决什么
 
