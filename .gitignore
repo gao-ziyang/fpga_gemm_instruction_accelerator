@@ -4,6 +4,11 @@ vitis_hls_project/
 vivado_board/
 vivado_project/
 vitis_ws/
+.metadata/
+Debug/
+Release/
+_ide/
+RemoteSystemsTempFiles/
 
 # Fine-grained patterns kept for future variants if a project folder is tracked.
 vitis_hls_project/**/solution*/csim/
@@ -24,6 +29,16 @@ __pycache__/
 *.pyc
 *.log
 *.jou
+*.str
+*.xsa
+*.bit
+*.hwh
+*.ltx
+*.mmi
+*.elf
+*.map
+*.bif
+BOOT.BIN
 
 # Generated data can be recreated
 tests/data/*.bin

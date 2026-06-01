@@ -32,6 +32,60 @@ csim_design
 csynth_design
 export_design -format ip_catalog
 
+# Vivado/Vitis HLS 2020.2 can generate a core_revision like 2605312313 on
+# newer dates, which overflows the old IP packager. If packaging failed,
+# rewrite only that generated revision field and rerun the packager.
+set ip_dir [file join $proj_parent $project_name "solution1" "impl" "ip"]
+set component_xml [file join $ip_dir "component.xml"]
+set ip_pack_tcl [file join $ip_dir "run_ippack.tcl"]
+if {![file exists $component_xml] && [file exists $ip_pack_tcl]} {
+    puts "INFO: component.xml missing after export_design; applying Vivado 2020.2 core_revision workaround."
+
+    set fp [open $ip_pack_tcl r]
+    set ip_pack_data [read $fp]
+    close $fp
+
+    regsub {set Revision[ \t]+"[0-9]+"} $ip_pack_data {set Revision    "1"} ip_pack_data
+
+    set fp [open $ip_pack_tcl w]
+    puts -nonewline $fp $ip_pack_data
+    close $fp
+
+    set old_dir [pwd]
+    cd $ip_dir
+
+    set vivado_cmd "vivado"
+    set vivado_bat "C:/Xilinx/Vivado/2020.2/bin/vivado.bat"
+    if {[file exists $vivado_bat]} {
+        set vivado_cmd $vivado_bat
+    }
+
+    if {[catch {exec $vivado_cmd -notrace -mode batch -source $ip_pack_tcl} pack_result]} {
+        puts "WARNING: IP repack workaround failed:"
+        puts $pack_result
+    } else {
+        puts $pack_result
+        puts "INFO: IP repack workaround finished."
+    }
+
+    cd $old_dir
+}
+
+set driver_makefile [file join $ip_dir "drivers" "accelerator_top_axi_v1_0" "src" "Makefile"]
+if {[file exists $driver_makefile]} {
+    puts "INFO: applying Windows CMD workaround to generated HLS driver Makefile."
+
+    set fp [open $driver_makefile r]
+    set makefile_data [read $fp]
+    close $fp
+
+    set makefile_data [string map [list "\t#echo" "\t@echo"] $makefile_data]
+
+    set fp [open $driver_makefile w]
+    puts -nonewline $fp $makefile_data
+    close $fp
+}
+
 close_project
 
 if {![info exists ::GZY_NO_EXIT]} {
