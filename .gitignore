@@ -48,3 +48,6 @@ tests/data/*.csv
 # python/analysis/roofline_experiments.csv tracked; report CSVs are reproducible.
 reports/**/*.csv
 reports/**/figures/
+
+# Local blog drafts / publishable notes kept outside project history.
+docs/blog_*.md
