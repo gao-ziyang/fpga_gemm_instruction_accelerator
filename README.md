@@ -1,492 +1,214 @@
 # fpga_gemm_instruction_accelerator
 
-这是我围绕 FPGA GEMM、CNN 卷积映射、Transformer Attention 和后续指令式加速器控制做的 HLS 学习工程。
-
-我的阶段性路线是：
-
-```text
-INT8 GEMM 微核
-  -> CNN Conv2D lowering/im2col 到 GEMM
-  -> Transformer QKV / QK^T / P*V
-  -> 最小 micro-instruction + accelerator_top
-  -> 后续再考虑 PS-PL、DDR、AXI、串口调试和上板
-```
+这是一个面向 ZYNQ-7020 的 FPGA GEMM / instruction accelerator 学习工程。当前主线已经从 HLS C-sim/C-synth 走到板级验证：PS 通过 AXI-Lite 配置 HLS IP，PL 通过 AXI master / HP 口访问 DDR，并在板上完成 GEMM 计算。
 
 ## 当前状态
 
-已经完成并验证：
-
-1. `INT8 x INT8 -> INT32 accumulate` 的 tiled GEMM，GEMM core 不再硬编码输出右移。
-2. `GEMM_MAX_N/K/M = 16/96/96`，`GEMM_TILE = 4` 的第一版扩容。
-3. 固定参数 CNN Conv2D：`Input[3,6,6]`、`Weight[4,3,3,3]`，映射为 `A[16,27] x B[27,4]`。
-4. Transformer QKV projection：`X[16,96] x W[96,96]`。
-5. Attention score：`Q[16,96] x K^T[96,16]`。
-6. Attention no-softmax：`Score_q[16,16] x V_q[16,96]`。
-7. Attention row-normalization 近似版：`P_q[16,16] x V_q[16,96]`。
-8. GEMM / Conv / QKV / Attention 均完成 C-sim、C-synth、C/RTL cosim。
-9. 固定 `N=16,K=96,M=96` 的 GEMM 并行规模 sweep：`TILE=4/8/12/14`，用于比较 DSP 使用、RTL latency 和理论性能 gap。
-10. 新增非 AXI 版系统验证路径：`gemm_core_mac -> gemm_scheduler -> instruction/decode -> accelerator_top`。
-11. 使用 `N=1024,K=1024,M=1024,TILE=12,BLOCK_N/K/M=96` 完成 V1/V2/V3 的 C-sim 和 C-synth。
-12. 使用 `N=128,K=128,M=128,TILE=12,BLOCK_N/K/M=96` 完成 V1/V2/V3 的 C/RTL cosim，用于验证 RTL 等价性。
-13. 完成 log11 scheduler 优化实验：64-bit 指令、`TILE=14`、`BLOCK_N/K/M=112`、A/B block 合并加载、local row banking=2、local A/B helper 等版本均完成 HLS 验证或综合记录。当前结论是 O1 作为可落地 baseline，O2 有 latency 收益但 LUT 超额，O4/O5 功能正确但性能变差，硬合并 local A/B load 不适合作为主线。
-14. 新增内部 roofline 分析脚本，将 O0-O6 的 HLS 结果转成 external traffic、CTC、actual MAC/cycle、compute peak utilization 和 local feeding 模型，作为后续优化分析基线。
-15. 完成 O6 full-block fast path 验证：功能、综合、Verilog cosim 均通过，但 latency 没有改善，且 full/boundary 双路径导致 DSP/LUT 明显增加，因此该版本只作为反例记录；O2 仍是性能探索点，O1 仍是当前可落地 baseline。
-16. 完成 O7 row banking sweep 和 O4 inline/direct 对照：row banking=4/7 资源代价过高且 latency 退化；O4inline/O4_2 功能正确但 C-synth latency 退化到约 2979010 cycles，说明 local A/B helper 合并方向不适合继续作为落地路线。
-17. 完成 O6 补充版 full-only 编译期开关验证：`O1_224_generic` 把 `N/K/M` 作为顶层运行时输入，`O6c_fullonly_224` 仍用编译期 full-only；两边功能、综合、Verilog cosim 均通过。干净对照显示 generic 边界控制主要增加 LUT/FF，而不是显著增加当前 latency。
-18. 扩展 `roofline_model.py`，保留原有 internal roofline 输出，同时新增 `ideal_lower_bound_model` 和 `hls_loop_schedule_model`。新的 loop schedule 模型按当前 HLS C++ 的 `tripcount x II` 分解 latency，更适合解释 O1/O2/O4/O5 的实际差距。
-19. 完成 O8 local double buffer A1/A2 实验：O8a 动态 bank ping-pong、O8b 静态 ping/pong、O8c 函数级 DATAFLOW 都没有得到可落地加速。O8b LUT 在预算内但 latency 退化到 `637122 cycles`；O8c 的 DATAFLOW 被 HLS 接受，但 top LUT 到 `85521`，cosim 长时间停滞后中止，因此只作为失败反例记录。
-20. 完成路线 D 的 block-level DATAFLOW 静态分析：完整 load/compute/store overlap 基本需要 A/B/C block buffer ping-pong，BRAM 从 56 估计到 112，但 O1 只剩约 4177 LUT 余量，DATAFLOW 控制和 bank mux 很可能让主配置超过 LUT 上限。因此 D 不直接进入 `TILE=14/BLOCK=112` 主线，只允许后续用小规模配置验证 HLS DATAFLOW report。
-
-这里的 `*_top()` 都是 HLS 单元验证入口；以后真正给 `accelerator_top()` 调用的应该是 `gemm_tiled()`、`conv2d_gemm()`、`qkv_projection()`、`attention_core()` 这类 core 函数。
-
-## 迭代日志阶段划分
-
-`docs/` 里的日志现在按三个阶段命名：
+当前已经验证到 Phase 3：
 
 ```text
-phase1_iteration_001-010:
-  功能路径和系统骨架阶段。重点是把 GEMM、Conv、Attention、scheduler、指令译码和非 AXI accelerator_top 跑通。
-
-phase2_iteration_011-019:
-  资源-带宽-并行度权衡阶段。文件名里尽量保留 O 编号和优化意图，重点是围绕 ZYNQ-7020 的 LUT/DSP/BRAM 约束分析 TILE=14/BLOCK=112 的 scheduler 优化、roofline 模型、full-only、row banking、local double buffer 和路线 D。
-
-phase3_iteration_020-:
-  上板闭环阶段。先把 accelerator_top_axi、AXI-Lite 控制、AXI master 访问 DDR、Vivado block design 和 Vitis PS 端 main.c 跑通。第一次只跑 GEMM 指令和 END 指令，不加入 Conv/Attention。
+PS -> DDR sanity
+PS -> AXI-Lite -> accelerator_top_axi register sanity
+PS -> AXI-Lite -> PL -> AXI master/HP -> DDR -> GEMM -> DDR -> PS golden check
 ```
 
-Phase 2 的入口是 `phase2_iteration_012_teacher_feedback_roofline_next_plan.md`。它记录了我从“功能能跑”转向“计算并行度、片上缓存容量、片外访存带宽三者权衡”的理解。
-Phase 3 的入口是 `phase3_iteration_020_board_bringup_plan.md`。它记录第一次上板只验证 PS-PL-DDR-GEMM 闭环，并明确 PS 负责生成指令流、PL 负责 decode/dispatch。
+板级 GEMM 已通过：
 
-## 当前核心参数
+| 测试规模 | 结果 |
+| --- | --- |
+| `4 x 4 x 4` | PASS |
+| `16 x 16 x 16` | PASS |
+| `112 x 112 x 112` | PASS |
 
-| 参数 | 当前值 | 我的理解 |
-| --- | --- | --- |
-| `GEMM_MAX_N` | 16 | HLS 综合时数组 N 维最大容量 |
-| `GEMM_MAX_K` | 96 | HLS 综合时数组 K 维最大容量 |
-| `GEMM_MAX_M` | 96 | HLS 综合时数组 M 维最大容量 |
-| `GEMM_TILE` | 默认 4 | 局部计算 tile，也就是当前微核并行粒度；benchmark Tcl 可以用宏临时覆盖 |
-| `GEMM_BLOCK_M` | 8 | B/C 按输出列分块缓存，降低一次缓存整列 M 的压力 |
-| `gemm_data_t` | `ap_int<8>` | 输入和权重量化数据 |
-| `gemm_acc_t` | `ap_int<32>` | 输出和中间累加数据 |
-
-`GEMM_MAX_*` 是硬件综合出来的最大数组容量；`N/K/M` 是每次调用时传入的实际尺寸。比如当前 `gemm_tiled()` 可以用同一份硬件跑 `7x6x5` 的 GEMM，也可以支撑 `16x96x96` 级别的 QKV。
-
-默认功能验证仍使用 `GEMM_TILE=4`，因为它对应 16 路局部 MAC，时序压力小，适合先验证 CNN/Transformer 映射关系。后续性能 sweep 会通过 Tcl 宏临时改成 `TILE=8/12/14`，用于观察更大并行阵列下的 DSP 使用、latency 和理论性能 gap。
-
-新增的 accelerator V1/V2/V3 路线使用独立的 `accelerator_types.h` 约束大矩阵验证规模。log10 已验证版本使用：
+`112 x 112 x 112` 串口结果：
 
 ```text
-GZY_GEMM_TILE      = 12
-GZY_ACCEL_BLOCK_N  = 96
-GZY_ACCEL_BLOCK_K  = 96
-GZY_ACCEL_BLOCK_M  = 96
-GZY_ACCEL_BENCH_N  = 1024
-GZY_ACCEL_BENCH_K  = 1024
-GZY_ACCEL_BENCH_M  = 1024
+PS-PL-DDR GEMM sanity start
+shape N=112 K=112 M=112
+AP_CTRL before start = 0x00000004
+AP_CTRL after wait = 0x00000006
+done=1 idle=1 ready=0
+ap_return = 1
+checksum = -37432528
+mismatch_count = 0
+PS-PL-DDR GEMM sanity PASS
 ```
 
-其中 `TILE=12` 对应约 144 路 MAC，`BLOCK_N/K/M=96` 对应每次搬入片上缓存的大块尺寸。
+这里 `mismatch_count = 0` 是关键：PL 写回 DDR 的 C 矩阵与 PS 端 CPU golden 逐元素一致。
 
-log11 scheduler 实验主要使用：
+## 当前板级 IP 配置
+
+当前上板使用的 HLS AXI top 是：
 
 ```text
-GZY_GEMM_TILE                = 14
-GZY_ACCEL_BLOCK_N/K/M        = 112
-GZY_ACCEL_LOAD_AB_PARALLEL   = 1
-GZY_ACCEL_LOCAL_ROW_UNROLL   = 2
-GZY_ACCEL_LOCAL_AB_PARALLEL  = 0/1
+hls/src/accelerator_top_axi.cpp
 ```
 
-指令字也从 128 bit 改成 64 bit，当前布局为 `opcode + N/K/M + base_unit`。`LOCAL_AB_PARALLEL=1` 的 helper 合并方向已经验证过功能正确，但 latency 和 LUT 都变差，所以后续不会沿着这个方向继续加码。由于当前 HLS 单元验证里 A/B/C 仍是分开的 memory port，base 字段先按 4096 element 对齐，后续真正接统一 DDR 地址空间时还需要重新设计寄存器或多条配置指令。
-
-当前我把 GEMM core 和量化后处理分开理解：
+对应脚本：
 
 ```text
-gemm_tiled()
-  -> 只做原始矩阵乘和 INT32 累加
-  -> C = A x B
-
-saturate_to_int8(x, shift)
-  -> 需要继续喂给 INT8 GEMM 时再做
-  -> 右移 shift + 饱和到 [-128,127]
+hls/scripts/run_hls_accel_axi_112.tcl
 ```
 
-这样做的好处是 GEMM 单元更干净，Python/C++ baseline 可以直接按矩阵乘对齐；CNN 输出如果只是作为 INT32 特征结果，不需要被固定右移；Transformer 的 Q/K/V、Score 这类中间值需要继续参与 INT8 GEMM 时，再由每个阶段单独配置 `q_shift`、`score_shift` 或 `p_shift`。
+关键宏：
 
-## 工程目录
+```text
+GZY_GEMM_TILE         = 14
+GZY_GEMM_BLOCK_M      = 14
+GZY_ACCEL_BLOCK_N     = 112
+GZY_ACCEL_BLOCK_K     = 112
+GZY_ACCEL_BLOCK_M     = 112
+GZY_ACCEL_MAX_N       = 112
+GZY_ACCEL_MAX_K       = 112
+GZY_ACCEL_MAX_M       = 112
+GZY_ACCEL_MAX_INSTR   = 4
+GZY_ACCEL_FULL_ONLY   = 0
+GZY_ACCEL_FULL_BLOCK_FAST = 0
+```
+
+注意：当前不是 `FULL_ONLY` 版本。`gemm_scheduler` 中仍然有 `current_N/current_K/current_M` 边界判断。也就是说，它不是“无边界判断，只能跑整块”的代码。
+
+不过当前 AXI IP 的综合脚本把 `GZY_ACCEL_MAX_N/K/M` 和 m_axi depth 都设成了 `112`。所以当前 bitstream 已经严格验证的是 `112` 以内以及 `112` 这个完整 block 尺寸；不要直接把它当成已经正式支持 `1024/2048` 的最终大矩阵 IP。要做大矩阵，建议先重新导出一个大尺寸兼容的 AXI IP，至少把 `GZY_ACCEL_MAX_*` / bench 尺寸和 PS buffer 规划一起改掉。
+
+## 目录结构
 
 ```text
 gzy_gemm_accel/
-  README.md
-  README_conv.md
-  README_attention.md
   hls/
-    src/
-      gemm_types.h
-      gemm_core.h
-      gemm_core.cpp
-      gemm_top.cpp
-      gemm_bench_top.h
-      gemm_bench_top.cpp
-      conv_types.h
-      conv_core.h
-      conv_core.cpp
-      conv_top.h
-      conv_top.cpp
-      qkv_projection.h
-      qkv_projection.cpp
-      qkv_top.cpp
-      attention_core.h
-      attention_core.cpp
-      attention_top.cpp
-      accelerator_types.h
-      gemm_scheduler.h
-      gemm_scheduler.cpp
-      gemm_scheduler_top.cpp
-      accelerator_instruction.h
-      accelerator_instruction.cpp
-      instruction_decode_top.cpp
-      accelerator_top.h
-      accelerator_top.cpp
-    tb/
-      tb_gemm.cpp
-      tb_gemm_bench.cpp
-      tb_conv.cpp
-      tb_qkv.cpp
-      tb_attention.cpp
-      accel_tb_common.h
-      tb_gemm_scheduler.cpp
-      tb_instruction_decode.cpp
-      tb_accelerator_top.cpp
-    scripts/
-      run_hls_gemm.tcl
-      run_hls_gemm_benchmark_sweep.tcl
-      run_hls_conv.tcl
-      run_hls_qkv.tcl
-      run_hls_attention_score.tcl
-      run_hls_attention_no_softmax.tcl
-      run_attention_hls.tcl
-      run_hls_accel_v123.tcl
-      run_hls_accel_v1_scheduler.tcl
-      run_hls_accel_v2_decode.tcl
-      run_hls_accel_v3_top.tcl
-      run_hls_accel_v1_scheduler_cosim_small.tcl
-      run_hls_accel_v2_decode_cosim_small.tcl
-      run_hls_accel_v3_top_cosim_small.tcl
-      run_hls_accel_log11_opt.tcl
-      run_hls_accel_log11_o3_scheduler.tcl
-      run_hls_accel_log11_o4_scheduler.tcl
-      run_hls_accel_log11_o5_scheduler.tcl
-      run_hls_accel_log13_o6_fastpath.tcl
-      run_hls_accel_log14_o7_row_unroll_sweep.tcl
-      run_hls_accel_log15_o4_inline_direct.tcl
-      run_hls_accel_log16_o6_full_only_224.tcl
-      run_hls_accel_log17_o8_local_double_buffer.tcl
-      run_hls_accel_log18_o8b_static_double_buffer.tcl
-      run_hls_accel_log19_o8c_ktile_dataflow.tcl
-  python/golden/
-  python/analysis/
-    roofline_model.py
-  docs/
-    phase1_iteration_001_minimal_gemm.md
-    phase1_iteration_002_tiled_gemm.md
-    phase1_iteration_003_buffer_boundary_quant.md
-    phase1_iteration_004_qkv_projection.md
-    phase1_iteration_005_conv2d_gemm.md
-    phase1_iteration_006_attention.md
-    phase1_iteration_007_expand_16_96_96.md
-    phase1_iteration_008_conv_init_optimization.md
-    phase1_iteration_009_gemm_benchmark_sweep.md
-    phase1_iteration_010_accelerator_v1_v2_v3.md
-    phase2_iteration_011_o0_o5_scheduler_loadab_rowbank_localab.md
-    phase2_iteration_012_teacher_feedback_roofline_next_plan.md
-    phase2_iteration_013_o0_o5_internal_roofline_loop_model.md
-    phase2_iteration_014_o6_runtime_full_block_fast_path.md
-    phase2_iteration_015_o7_row_banking_sweep_o4_inline_direct.md
-    phase2_iteration_016_o1_generic_vs_o6c_fullonly_224.md
-    phase2_iteration_017_o8a_local_double_buffer_dynamic_pingpong.md
-    phase2_iteration_018_o8b_o8c_local_double_buffer_static_dataflow.md
-    phase2_iteration_019_routeD_block_level_dataflow_analysis.md
-    phase3_iteration_020_board_bringup_plan.md
-  reports/
-    internal_roofline_points.csv
-    internal_roofline_summary.md
-  vitis_hls_project/   # Vitis HLS 生成目录，本地保留，不上传
+    src/                  # HLS C++ 源码
+    tb/                   # HLS testbench
+    scripts/              # Vitis HLS Tcl 脚本
+  ps_apps/                # 可追踪的 PS 端应用源码快照
+  scripts/                # XSCT 下载/运行脚本
+  docs/                   # 迭代日志和问题记录
+  python/
+    golden/               # Python golden / 小验证
+    analysis/             # roofline 和分析脚本
 ```
 
-## 主要模块
+`vitis_ws/`、`vivado_board/`、`vitis_hls_project/` 是本地 GUI/工具生成目录，默认不作为源码提交。
 
-| 模块 | 作用 | 数学含义 |
-| --- | --- | --- |
-| `gemm_tiled` | 通用 INT8 GEMM 核 | `C = A x B`，输出为 INT32 累加结果 |
-| `conv2d_gemm` | Conv2D lowering/im2col 后调用 GEMM | `Conv2D -> A x B -> output` |
-| `qkv_projection` | 复用同一个 X，依次计算 Q/K/V | `Q=XWq, K=XWk, V=XWv` |
-| `attention_score_core` | 计算 Attention score | `Score = Q_q x K_q^T` |
-| `attention_no_softmax_core` | 暂不做 softmax，先验证完整矩阵流 | `Out = Score_q x V_q` |
-| `attention_core` | row-normalization 近似 attention | `Out = P_q x V_q` |
-| `gemm_core_mac` | 最底层局部 MAC 阵列 | `localC += localA x localB` |
-| `gemm_scheduler` | 大矩阵分块、片上缓存和 partial sum 管理 | `A/B/C block -> local tile -> MAC array` |
-| `execute_instruction_stream` | 指令译码和算子 dispatch | `GEMM instruction -> gemm_scheduler` |
-| `accelerator_top` | 当前非 AXI 版系统验证顶层 | `instr_mem + A/B/C memory -> status` |
+## 核心模块
 
-`Q/K/V` 先由 GEMM 得到 `gemm_acc_t`，后续再喂给 GEMM 前必须用 `saturate_to_int8()` 做右移、截断和饱和，转回 `gemm_data_t`。
-
-## 如何运行
-
-Python baseline：
-
-```bash
-python3 python/golden/gemm_4x4_baseline.py
-python3 python/golden/qkv_projection_baseline.py
-python3 python/analysis/roofline_model.py
-```
-
-Windows / Vitis HLS 2020.2：
-
-```bat
-C:\xilinx\Vitis_HLS\2020.2\bin\vitis_hls.bat -f C:\Transformer\gzy_gemm_accel\hls\scripts\run_hls_gemm.tcl
-C:\xilinx\Vitis_HLS\2020.2\bin\vitis_hls.bat -f C:\Transformer\gzy_gemm_accel\hls\scripts\run_hls_conv.tcl
-C:\xilinx\Vitis_HLS\2020.2\bin\vitis_hls.bat -f C:\Transformer\gzy_gemm_accel\hls\scripts\run_hls_qkv.tcl
-C:\xilinx\Vitis_HLS\2020.2\bin\vitis_hls.bat -f C:\Transformer\gzy_gemm_accel\hls\scripts\run_hls_attention_score.tcl
-C:\xilinx\Vitis_HLS\2020.2\bin\vitis_hls.bat -f C:\Transformer\gzy_gemm_accel\hls\scripts\run_hls_attention_no_softmax.tcl
-C:\xilinx\Vitis_HLS\2020.2\bin\vitis_hls.bat -f C:\Transformer\gzy_gemm_accel\hls\scripts\run_attention_hls.tcl
-C:\xilinx\Vitis_HLS\2020.2\bin\vitis_hls.bat -f C:\Transformer\gzy_gemm_accel\hls\scripts\run_hls_gemm_benchmark_sweep.tcl
-C:\xilinx\Vitis_HLS\2020.2\bin\vitis_hls.bat -f C:\Transformer\gzy_gemm_accel\hls\scripts\run_hls_accel_v123.tcl
-C:\xilinx\Vitis_HLS\2020.2\bin\vitis_hls.bat -f C:\Transformer\gzy_gemm_accel\hls\scripts\run_hls_accel_log11_opt.tcl
-C:\xilinx\Vitis_HLS\2020.2\bin\vitis_hls.bat -f C:\Transformer\gzy_gemm_accel\hls\scripts\run_hls_accel_log13_o6_fastpath.tcl
-C:\xilinx\Vitis_HLS\2020.2\bin\vitis_hls.bat -f C:\Transformer\gzy_gemm_accel\hls\scripts\run_hls_accel_log14_o7_row_unroll_sweep.tcl
-C:\xilinx\Vitis_HLS\2020.2\bin\vitis_hls.bat -f C:\Transformer\gzy_gemm_accel\hls\scripts\run_hls_accel_log15_o4_inline_direct.tcl
-C:\xilinx\Vitis_HLS\2020.2\bin\vitis_hls.bat -f C:\Transformer\gzy_gemm_accel\hls\scripts\run_hls_accel_log16_o6_full_only_224.tcl
-C:\xilinx\Vitis_HLS\2020.2\bin\vitis_hls.bat -f C:\Transformer\gzy_gemm_accel\hls\scripts\run_hls_accel_log17_o8_local_double_buffer.tcl
-C:\xilinx\Vitis_HLS\2020.2\bin\vitis_hls.bat -f C:\Transformer\gzy_gemm_accel\hls\scripts\run_hls_accel_log18_o8b_static_double_buffer.tcl
-C:\xilinx\Vitis_HLS\2020.2\bin\vitis_hls.bat -f C:\Transformer\gzy_gemm_accel\hls\scripts\run_hls_accel_log19_o8c_ktile_dataflow.tcl
-```
-
-常规单元脚本会依次执行：
-
-```text
-csim_design
-csynth_design
-cosim_design -rtl verilog
-```
-
-`run_hls_accel_v1/v2/v3_*1024` 脚本只跑 `C-sim + C-synth`，因为 `1024^3` 的 RTL cosim 会仿真数千万周期；对应的 RTL 等价验证使用 `*_cosim_small.tcl` 在 `128^3` 规模下完成。
-
-## 验证结果
-
-| Case | 维度 | C-sim | C-synth | C/RTL cosim | mismatch | max_abs_error | checksum |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| GEMM | `A[7,6] x B[6,5]` | PASS | PASS | PASS | 0 | 0 | 56726 |
-| Conv2D via GEMM | `Input[3,6,6]`, `Weight[4,3,3,3]`, `A[16,27] x B[27,4]` | PASS | PASS | PASS | 0 | 0 | -72952 |
-| QKV projection | `X[16,96] x W[96,96]` | PASS | PASS | PASS | 0 | 0 | 265116672 |
-| Attention score | `Q[16,96] x K^T[96,16]` | PASS | PASS | PASS | 0 | 0 | -31663104 |
-| Attention no-softmax + row-normalization | `Score_q[16,16] x V_q[16,96]` / `P_q[16,16] x V_q[16,96]` | PASS | PASS | PASS | 0 | 0 | 74785584 |
-| GEMM benchmark sweep | `A[16,96] x B[96,96]`, `TILE=4/8/12/14` | PASS | PASS | PASS | 0 | 0 | 101159936 |
-| Accelerator V1/V2/V3 large | `A[1024,1024] x B[1024,1024]`, `TILE=12,BLOCK=96` | PASS | PASS | 128 规模 PASS | 0 | 0 | 2087749971 |
-| Accelerator log11 O0/O1/O2/O5 | `A[128,128] x B[128,128]`, `TILE=14,BLOCK=112` | PASS | PASS | PASS | 0 | 0 | 35200361 |
-| Accelerator log15 O4inline/O4_2 | `A[128,128] x B[128,128]`, `TILE=14,BLOCK=112` | PASS | PASS | O4inline PASS，O4_2 未完整跑 | 0 | 0 | 35200361 |
-| Accelerator log16 O1 generic/O6 full-only | `A[224,224] x B[224,224]`, `TILE=14,BLOCK=112` | PASS | PASS | PASS | 0 | 0 | -159053159 |
-| Accelerator log17 O8 local double buffer A1 | `A[128,128] x B[128,128]`, `TILE=14,BLOCK=112` | PASS | PASS | PASS | 0 | 0 | 35200361 |
-| Accelerator log18/19 O8 A2 double buffer | `A[128,128] x B[128,128]`, `TILE=14,BLOCK=112` | PASS | PASS | O8b PASS，O8c FAIL/stop | 0 | 0 | 35200361 |
-
-## 综合与 cosim 摘要
-
-| Top | BRAM_18K | DSP | FF | LUT | Estimated clock | RTL latency |
-| --- | --- | --- | --- | --- | --- | --- |
-| `gemm_top` | 2 | 16 | 3914 | 5226 | 7.142 ns | 544 cycles |
-| `conv_top` | 15 | 16 | 1894 | 3574 | 7.103 ns | 2594 cycles |
-| `qkv_top` | 2 | 16 | 3921 | 5375 | 7.300 ns | 360362 cycles |
-| `attention_score_top` | 10 | 17 | 4517 | 5764 | 7.050 ns | max 23025 cycles |
-| `attention_no_softmax_top` | 37 | 49 | 13135 | 18117 | 7.300 ns | max 407139 cycles |
-| `attention_top` | 37 | 49 | 15884 | 20155 | 7.300 ns | max 408064 cycles |
-| `gemm_scheduler_top` V1, 1024 | 48 | 144 | 22842 | 15967 | 7.111 ns | 47393183 cycles |
-| `instruction_decode_top` V2, 1024 | 48 | 147 | 24629 | 17599 | 7.653 ns | 动态指令 top，最坏 latency 不作为性能值 |
-| `accelerator_top` V3, 1024 | 48 | 147 | 24629 | 17612 | 7.653 ns | 动态指令 top，最坏 latency 不作为性能值 |
-| log11 O0 scheduler | 56 | 196 | 33470 | 49206 | 7.218 ns | 381634 cycles |
-| log11 O1 loadAB | 56 | 196 | 33282 | 49023 | 7.165 ns | 381634 cycles |
-| log11 O2 loadAB+bank2 | 84 | 196 | 34317 | 67546 | 7.143 ns | 317122 cycles |
-| log11 O5 localAB helper | 56 | 196 | 40296 | 83514 | 7.165 ns | 721602 cycles |
-| log13 O6a full-block fast path | 56 | 392 | 62788 | 69099 | 7.218 ns | 381634 cycles |
-| log13 O6b full-block fast path + bank2 | 84 | 392 | 64184 | 134637 | 7.143 ns | 317186 cycles |
-| log14 O7a row bank4 | 224 | 196 | 42468 | 82719 | 7.246 ns | 330946 cycles |
-| log14 O7b row bank7 | 392 | 196 | 267912 | 193181 | 7.143 ns | 413890 cycles |
-| log15 O4inline helper | 56 | 196 | 43062 | 27623 | 7.165 ns | 2988226 cycles |
-| log16 O1 224 generic | 56 | 199 | 35271 | 51289 | 7.653 ns | 381879 cycles |
-| log16 O6c full-only 224 | 56 | 196 | 29822 | 19539 | 7.263 ns | 381634 cycles |
-| log17 O8a local double buffer A1 | 56 | 196 | 46991 | 86755 | 7.165 ns | 705730 cycles |
-| log18 O8b static double buffer A2 | 56 | 196 | 56031 | 48029 | 7.165 ns | 637122 cycles |
-| log19 O8c ktile DATAFLOW A2 | 56 | 196 | 87153 | 85521 | 7.165 ns | 794306 cycles C-synth est. |
-
-`attention_top` 里 row-normalization 目前使用整数除法，HLS 生成了 `sdiv`，所以它是一个能跑通的第一版近似，不是最终资源优化版本。
-
-V2/V3 的顶层 `N/K/M` 来自指令字段，HLS 综合报告会给出非常保守的动态最坏 latency；当前性能分析主要看 V1 固定尺寸 scheduler 的 `47393183 cycles`。V2/V3 用 128 规模 RTL cosim 验证控制路径和 RTL 等价性，Verilog latency 分别为 `315251 cycles`。
-
-log11-log19 的几个小实验说明：`TILE=14` 可以把 DSP 提到 196 个，接近 ZYNQ-7020 上限；A/B block 合并加载在模型上减少了外层 block load cycles，`N=K=M=128,BLOCK=112` 时理论节省约 `8*112*112=100352 cycles`，所以后续版本默认保留这个结构，但整体瓶颈仍不在这里。row banking=2 能把 128 规模 RTL latency 从 `381634` 降到 `317122`，但 LUT 超过器件容量。O7 继续把 row banking 加到 4/7 后，BRAM/LUT 明显爆炸且 latency 退化，所以高倍数行 banking 不适合作为落地路线。local A/B helper 合并方向也已经收敛：O4/O5 慢，O4inline/O4_2 直接退化到约 `2979010` C-synth cycles。O6 full-only 证明编译期只保留 full path 是可行的；和 `O1_224_generic` 对比时，LUT 从 `51289` 降到 `19539`，说明边界/generic 控制对资源代价很大，但 latency 只从 `381879` 降到 `381634`。O8a 说明顺序 ping-pong local double buffer 没有形成 load/compute overlap，动态 bank helper 还让 local A/B load Final II 退化到 7，LUT 到 `86755`。O8b 改成静态 ping/pong 后 LUT 回到 `48029`，但 latency 仍退化到 `637122`；O8c 的函数级 DATAFLOW 确实被 HLS 接受，但单个 dataflow helper 就有大量 FIFO，top LUT 到 `85521`。当前性能瓶颈仍然主要在 block/tile 调度和 local feeding 没有重叠；double buffering 思路有意义，但当前 helper/DATAFLOW over array 的写法不适合作为可落地路线。
-
-## 论文启发和内部 roofline
-
-结合 DianNao 和 FPGA'15 CNN accelerator 论文，我现在把性能问题拆成两层：
-
-```text
-外部 roofline:
-  DDR/AXI -> A_buf/B_buf/C_buf 的数据搬运是否限制整体吞吐。
-
-内部 roofline:
-  A_buf/B_buf/C_buf -> localA/localB/localC -> GEMM MAC 阵列是否喂得上。
-```
-
-当前阶段重点先看内部 roofline。原因是 O1 合并外层 A/B block load 没有降低 latency，而 O2 的 row banking/unroll=2 能降低 latency，说明瓶颈更像是片上 buffer 到 local tile 的喂数路径。
-
-`python/analysis/roofline_model.py` 会生成：
-
-```text
-reports/internal_roofline_points.csv
-reports/internal_roofline_summary.md
-reports/ideal_lower_bound_points.csv
-reports/ideal_lower_bound_summary.md
-reports/hls_loop_schedule_points.csv
-reports/hls_loop_schedule_summary.md
-reports/combined_roofline_points.csv
-reports/combined_roofline_summary.md
-```
-
-现在我把模型分成三层来看：
-
-```text
-ideal_lower_bound_model
-  -> DDR 带宽下界 + 理想 compute + 理想 local 搬运
-  -> 只作为 optimistic lower bound，不预测 HLS latency
-
-hls_loop_schedule_model
-  -> 按当前 C++ loop tripcount x II 估算
-  -> 对应 T_load_AB_block + T_compute_block_internal + T_store_C_block + T_control
-
-internal_roofline_model
-  -> 保留旧的 roofline / CTC / resource-efficiency 口径
-```
-
-当前 O0-O5 的 roofline 核心结果：
-
-| Case | attainable MAC/cycle | actual MAC/cycle | compute util | attainable util | latency/roof | 结论 |
-| --- | --- | --- | --- | --- | --- | --- |
-| O0 | 128.000 | 5.495 | 2.80% | 4.29% | 23.29x | 串行调度基线，internal/scheduler-bound |
-| O1 | 128.000 | 5.495 | 2.80% | 4.29% | 23.29x | A/B block 合并加载无收益 |
-| O2 | 128.000 | 6.613 | 3.37% | 5.17% | 19.36x | row banking 有收益，但 LUT 超额 |
-| O4/O5 | 128.000 | 2.906 | 1.48% | 2.27% | 44.04x | local A/B helper 合并方向退化 |
-
-这里的 `attainable MAC/cycle = min(compute roof, memory roof)`。在当前假设下，`compute roof = 196 MAC/cycle`，外部 DDR roof 约为 `128 MAC/cycle`，所以 attainable roof 是 `128 MAC/cycle`。O2 只有 `6.613 MAC/cycle`，说明当前不是先被 DDR 卡死，而是 PL 内部 scheduler/local feeding 明显没喂满 MAC 阵列。
-
-## Latency 分解和各版本归类
-
-我现在采用下面这套更贴近当前 HLS 代码的分解：
-
-```text
-T_total
-  ~= T_load_AB_block
-   + T_compute_block_internal
-   + T_store_C_block
-   + T_control
-```
-
-其中 `T_load_AB_block` 对应 DDR/memory port 到 `A_buf/B_buf` 的大块加载循环；`T_compute_block_internal` 对应 `compute_block()` 里的 localC 读取、localA/localB 读取、`gemm_core_mac()` 和 localC 写回；`T_store_C_block` 对应 `C_buf -> C_mem`；剩下没有被 tripcount x II 解释掉的部分记作 `T_control`。这个模型不使用 tail block 的实际 `current_N/K/M` 去减少循环次数，因为当前 generic HLS 代码的循环上界仍然是 `ACCEL_BLOCK_N/K/M`。
-
-| Version | 图中主分类 | HLS loop model | HLS actual | T_control | ideal roof gap | deploy | 我的理解 |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| O0 | `T_compute_block_internal` | 336896 | 381634 | 44738 | 23.29x | deployable | 串行/合并外部加载在当前规模差异不明显，主要仍卡在内部 local feeding。 |
-| O1 | `T_compute_block_internal` | 336896 | 381634 | 44738 | 23.29x | deployable | 当前 ZYNQ-7020 可落地 baseline，LUT=49023 未超过 53200。 |
-| O2 | `T_compute_block_internal` | 272384 | 317122 | 44738 | 19.36x | not deployable | row_unroll=2 降低 local load/store 时间，所以更快；但 LUT=67546 超过 53200，只能作为性能探索点。 |
-| O4 | `T_compute_block_internal` | 623616 | 721602 | 97986 | 44.04x | not deployable | local A/B helper 让每个 output tile 的 local 搬运变重，latency 和 LUT 都退化。 |
-| O5 | `T_compute_block_internal` | 623616 | 721602 | 97986 | 44.04x | not deployable | 加 helper buffer partition 没救回来，说明问题不是单纯 pragma 缺失。 |
-| O4inline | `T_control` | 623616 | 2988226 | 2364610 | 182.39x | deployable | 强制 inline 后 LUT 降了，但控制/调度开销极大，latency 失控，不适合作为路线。 |
-| O6a | `T_compute_block_internal` | 336896 | 381634 | 44738 | 23.29x | not deployable | runtime full/fallback 双路径一起综合，DSP/LUT 翻倍，没有 latency 收益。 |
-| O6b | `T_compute_block_internal` | 272384 | 317186 | 44802 | 19.36x | not deployable | 继承 O2 的 latency 收益，但又叠加 O6 双路径资源问题。 |
-| O1_224_generic | `T_compute_block_internal` | 336896 | 381879 | 44983 | 6.66x | deployable | 运行时 `N/K/M` generic 版本接近以后 DDR 场景，资源接近上限但仍未超过 LUT。 |
-| O6c_fullonly_224 | `T_compute_block_internal` | 336896 | 381634 | 44738 | 6.66x | deployable | full-only 大幅降低 LUT，但 latency 基本不变，说明边界判断主要是资源问题。 |
-| O7a | `T_load_AB_block` | 244736 | 330946 | 86210 | 20.20x | not deployable | row_unroll=4 继续降低内部 local 部分，但 BRAM/LUT 代价过高，外层 load 和控制变得更显眼。 |
-| O7b | `T_control` | 226304 | 413890 | 187586 | 25.26x | not deployable | row_unroll=7 资源和控制复杂度爆炸，latency 反而退化。 |
-| O8a | `T_compute_block_internal` | 1025024 | 705730 | -319294 | 43.07x | not deployable | 顺序 ping-pong local double buffer 没有 overlap，local A/B load II=7，local feeding 占比约 93.44%，latency 和 LUT 都退化。 |
-| O8b | `T_compute_block_internal` | 1025024 | 637122 | -387902 | 38.89x | deployable but slower | 静态 ping/pong 让 LUT 回到预算内，但没有形成有效 overlap，latency 明显慢于 O1。 |
-| O8c | `T_compute_block_internal` | 1025024 | 794306 | -230718 | 48.48x | not deployable | 函数级 DATAFLOW 被接受，但 FIFO/LUT 代价太高，cosim 长时间停滞后中止。 |
-
-对照理想下界看，128 规模版本的 `ideal_roofline_cycles` 只有 `16384`，即使采用五阶段理想不 overlap 的 `ideal_no_overlap_cycles` 也只有 `82944`。O1 实际是 `381634`，约为理想 roofline 的 `23.29x`、五阶段理想的 `4.60x`。O8a 实际是 `705730`，约为理想 roofline 的 `43.07x`、五阶段理想的 `8.51x`；O8b 是 `637122`，约为理想 roofline 的 `38.89x`、五阶段理想的 `7.68x`；O8c 综合估计是 `794306`，约为理想 roofline 的 `48.48x`、五阶段理想的 `9.58x`。这说明当前 double buffer 写法没有真正隐藏 local feeding，反而把 helper、FIFO、mux 和调度代价暴露出来。整体来看，当前主要差距不是“理论 MAC 数不够”，而是 HLS loop schedule 里 local load/store、block 级调度和控制没有被 dataflow/double buffer 隐藏。
-
-模型现在还额外输出：
-
-```text
-compute_roof_mac_per_cycle / compute_roof_ops_per_cycle
-mem_roof_mac_per_cycle / mem_roof_ops_per_cycle
-actual_mac_per_cycle / actual_ops_per_cycle
-roof_cycles_min
-latency_over_roof_lower_bound
-compute_peak_util
-attainable_roof_util
-local_model_gap
-total_model_gap
-GOPS/DSP, GOPS/BRAM18K, GOPS/kLUT
-```
-
-下一步优化按这个顺序推进：
-
-```text
-O6: full-only 编译期路径已验证，记录为补充反例。
-O7: row banking sweep 已验证，行 banking 不作为落地路线。
-O8: local double buffer A1/A2 已验证，作为失败反例记录。
-O9: 路线 A 收敛，不再继续给 O8 helper/DATAFLOW over local arrays 加 pragma。
-O10: 路线 D 先保持设计分析和小规模 prototype，不在 `TILE=14,BLOCK=112` 上直接做完整 block-level DATAFLOW。
-```
-
-## 路线 A/D 当前结论
-
-路线 A 的 O8a/O8b/O8c 已经说明：只加 ping-pong buffer 不够。O8a 的动态 `bank` 参数会引入 mux 和端口冲突；O8b 避免动态 bank 后资源降回预算内，但仍没有有效 overlap；O8c 的函数级 DATAFLOW 能被 HLS 接受，但 complete-partition local array 经过 dataflow process 时插入了大量 FIFO，直接超过 LUT 上限。这里路线 A 已经收敛，不再继续给 O8 添加 pragma。
-
-路线 D 暂时只分析，不直接大改。当前可 overlap 的层级有三类：K tile 级 local load/compute overlap、K block 级 load next A/B block 与 compute current block、N/M block 级 load/compute/store overlap。`A_buf/B_buf` 跨 block 依赖较少；如果要 load next 和 compute current 重叠，基本需要 A/B ping-pong。`C_buf` 有跨 K block 的累加 RAW 依赖，必须等最后一个 K block 后才能 store；如果还要 store previous 和 compute current 重叠，基本需要 C ping-pong。
-
-资源上，O1 的 block buffer 分布约为 `A_buf=14 BRAM18K, B_buf=14 BRAM18K, C_buf=28 BRAM18K`，合计 `56 BRAM18K`。只复制 A/B 会到约 `84 BRAM18K`；完整复制 A/B/C 会到约 `112 BRAM18K`，BRAM 本身还可承受。但 O1 已经是 `49023 LUT`，离 `53200` 只剩约 `4177 LUT`。DATAFLOW 控制、banked BRAM ping-pong mux、scalar propagation FIFO 和边界控制很可能超过这点余量。O8c 只做 K tile 级局部 DATAFLOW，top 就到 `85521 LUT`，所以在 `TILE=14/BLOCK=112` 上直接做完整 D 路线大概率无法保持 `LUT<53200`。更合理的做法是只用 `TILE=4/8, BLOCK=16/32, N/K/M=32/64` 之类小规模 prototype 验证 HLS dataflow report，并且 DATAFLOW task 之间不要传 complete-partition local array。
-
-## GEMM 并行规模 sweep
-
-这一组实验固定 `N=16,K=96,M=96`，也就是 `total MAC = 147456`，只改变 `GEMM_TILE` 和对应的 `GEMM_BLOCK_M`。实际吞吐使用 C/RTL cosim 的 Verilog latency 计算：
-
-```text
-actual_mac_per_cycle = total_mac / rtl_latency
-GMAC/s @100MHz = actual_mac_per_cycle * 0.1
-GOPS @100MHz = GMAC/s * 2
-```
-
-| TILE | BLOCK_M | DSP | BRAM_18K | FF | LUT | Estimated clock | RTL latency | Actual MAC/cycle | GMAC/s @100MHz | GOPS @100MHz |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| 4 | 8 | 16 | 2 | 1599 | 1552 | 7.136 ns | 118720 | 1.242 | 0.124 | 0.248 |
-| 8 | 8 | 64 | 2 | 5448 | 3441 | 7.136 ns | 54784 | 2.692 | 0.269 | 0.538 |
-| 12 | 12 | 144 | 2 | 11865 | 6824 | 7.136 ns | 52972 | 2.784 | 0.278 | 0.557 |
-| 14 | 14 | 197 | 2 | 16271 | 9393 | 7.136 ns | 54492 | 2.706 | 0.271 | 0.541 |
-
-这组结果说明 DSP 使用量确实能随 `TILE*TILE` 增大，但实际吞吐没有线性提升。主要原因是当前 latency 统计的是完整 `gemm_tiled()` 调用，包括 A/B 搬入片上缓存、local tile 搬运、边界处理和写回；这些阶段还没有和 `dot_k` 计算阶段做 dataflow overlap。`TILE=14` 已经使用 197 个 DSP，接近 ZYNQ-7020 的 DSP 上限，适合作为“接近吃满 DSP”的性能对比点，但后续系统集成时仍需要给 Conv/Attention 外围逻辑预留资源。
-
-Conv2D 这里已经做了两步优化：先去掉 wrapper 里对 `A/B/C` 最大矩阵的全量初始化，再把 `conv_top()` 外部接口改成 flat `input[108]`、`weight[108]`、`output[64]`，并用自增地址写 im2col/weight flatten/reshape。这样避免 HLS 为多维数组和非 2 的幂循环拍平生成大量 `urem/div/mul` 地址逻辑，Conv RTL latency 从 `15448 cycles` 降到 `2594 cycles`，额外 DSP 也从 36 降回 GEMM 微核本身的 16。
-
-## 环境
-
-| 项目 | 当前值 |
+| 模块 | 作用 |
 | --- | --- |
-| OS | WSL2 Ubuntu on Windows |
-| Vitis HLS / Vivado | 2020.2 |
-| Target FPGA | `xc7z020clg400-2` |
-| Target clock | 10 ns |
-| C++ compiler | Vitis HLS 自带 GCC |
-| Python | 3.12.3 |
-| 当前未使用 | PyTorch、Verilator、cocotb、上板 Vivado block design |
+| `gemm_core.cpp` | 局部 INT8 GEMM MAC tile |
+| `gemm_scheduler.cpp` | 大矩阵分块、片上 buffer、load/compute/store |
+| `accelerator_instruction.cpp` | 64-bit 指令译码和 dispatch |
+| `accelerator_top_axi.cpp` | 板级 AXI-Lite + AXI master 顶层 |
+| `ps_apps/accel_axi_112_gemm_test/helloworld.c` | 当前已验证的 PS-PL-DDR GEMM 测试源码快照 |
 
-## 后续路径思考
-
-我一开始会把任务 2 想得像“做一个 CPU 或 RISC-V”，现在更准确的理解是：先做一个面向神经网络算子的 micro-instruction 控制器。也就是固定宽度指令字里放 `opcode`、shape、scale、buffer id 等字段，然后 `accelerator_top()` 负责取指、译码、配置参数和调用 `gemm_tiled/conv2d_gemm/qkv_projection/attention_core`。
-
-后续上板时，我也想过能不能 PC 直接串口连 PL 顶层。现在我的理解是：不太建议这样做。串口通常先进 PS 或外部 USB-UART 控制逻辑，再由 PS 通过 AXI-Lite/AXI Master/DMA 去驱动 PL 加速器。PL 更适合做确定的数据通路和计算阵列；PS 更适合做串口协议、DDR 管理、启动停止和状态读取。
-
-所以我后面的优先级是：
+当前指令格式是 64 bit：
 
 ```text
-1. 保持各算子 core 稳定。
-2. 做 C-sim 友好的 accelerator_top 指令解释器。
-3. 再把最终 accelerator_top 的接口改成 AXI-Lite 控制 + DDR/AXI/DMA 数据通路。
-4. 最后再考虑串口作为 PC 与 PS 的调试入口。
+bits  7:0   opcode
+bits 19:8   N - 1
+bits 31:20  K - 1
+bits 43:32  M - 1
+bits 49:44  A base / 4096
+bits 55:50  B base / 4096
+bits 61:56  C base / 4096
 ```
+
+当前只验证了：
+
+```text
+GEMM
+END
+```
+
+## 已验证的 Vitis/XSCT 运行方式
+
+先在 Vitis 里 build 对应 application，再 Program Device，然后用 XSCT 脚本下载 ELF。
+
+AXI-Lite register sanity：
+
+```tcl
+source C:/Transformer/gzy_gemm_accel/scripts/xsct_run_ip_reg_test.tcl
+```
+
+GEMM 运行脚本：
+
+```tcl
+source C:/Transformer/gzy_gemm_accel/scripts/xsct_run_gemm_test.tcl
+source C:/Transformer/gzy_gemm_accel/scripts/xsct_run_gemm16_test.tcl
+source C:/Transformer/gzy_gemm_accel/scripts/xsct_run_gemm112_test.tcl
+```
+
+如果 XSCT `targets` 中出现 DAP/AP transaction error，优先按 JTAG/DAP/PS debug 状态问题处理，不要先怀疑 C 代码或 linker script。更详细记录见：
+
+```text
+docs/phase3_iteration_022_vitis_platform_application_hello_world.md
+docs/phase3_iteration_023_ps_pl_ddr_gemm_sanity.md
+```
+
+## 关于 1024 / 2048 / 1008 / 2016
+
+当前这版不是 full-only，所以从 scheduler 逻辑看，`1024`、`2048` 这种非 112 整倍数尺寸也有边界路径，不是一定要换成 `1008`、`2016`。
+
+但从性能和排查角度，下一步建议先测 112 的整数倍：
+
+```text
+1008 = 9  * 112
+2016 = 18 * 112
+```
+
+原因：
+
+```text
+1. 1008/2016 避开边界 block，更适合先测 full block 主路径。
+2. 如果 1008/2016 过了，再测 1024/2048，可以单独验证边界路径。
+3. 大矩阵需要重新规划 DDR buffer 地址间隔，不能继续用 0x01020000 / 0x01030000 / 0x01040000 这种 64KB 间隔。
+4. 当前 AXI IP 的 MAX/depth 是 112，直接用旧 bitstream 跑 1008/2016 不够严谨；更建议重新导出大尺寸兼容 IP。
+```
+
+大矩阵 buffer 估算：
+
+| 尺寸 | A int8 | B int8 | C int32 | 合计 |
+| --- | ---: | ---: | ---: | ---: |
+| `1008^3` | about 1.0 MB | about 1.0 MB | about 4.1 MB | about 6.1 MB |
+| `2016^3` | about 4.1 MB | about 4.1 MB | about 16.3 MB | about 24.5 MB |
+
+所以大矩阵 PS 端建议改成类似：
+
+```text
+instr = 0x01010000
+A     = 0x02000000
+B     = 0x03000000
+C     = 0x04000000
+```
+
+## 下一步计划
+
+我建议不要马上跳 `2048`。更稳的路线：
+
+1. 给当前 `112x112x112` 加 cycle 计时，记录 PS 端等待 IP 的周期数。
+2. 重复运行 `112x112x112` 多次，确认稳定性。
+3. 加一条第二个 GEMM 指令，验证 `GEMM + GEMM + END` 指令流，而不是只跑单指令。
+4. 测不同 `a_base/b_base/c_base`，验证多 buffer offset。
+5. 重新导出大尺寸兼容 AXI IP，例如 `MAX_N/K/M=1008`，先测 `1008x1008x1008`。
+6. 如果 1008 稳定，再测 `1024`，专门验证边界路径。
+7. 最后再考虑 `2016/2048`，并加入运行时间、吞吐和 DDR 带宽分析。
+
+短期最值得做的是：
+
+```text
+112 计时 + 多指令 + 多 buffer
+```
+
+这比直接堆到 2048 更能证明这个 instruction accelerator 架构是可控的。
+
+## 迭代日志
+
+重要日志：
+
+```text
+docs/phase3_iteration_020_board_bringup_plan.md
+docs/phase3_iteration_021_vivado_bd_from_hls_ip.md
+docs/phase3_iteration_022_vitis_platform_application_hello_world.md
+docs/phase3_iteration_023_ps_pl_ddr_gemm_sanity.md
+docs/phase3_note_hls_driver_makefile_echo_windows.md
+docs/phase3_note_vivado_2020_ip_packager_revision.md
+```
+
+Phase 1/2 的历史功能、优化和反例仍保留在 `docs/phase1_*`、`docs/phase2_*` 中。README 只记录当前主线和下一步。
