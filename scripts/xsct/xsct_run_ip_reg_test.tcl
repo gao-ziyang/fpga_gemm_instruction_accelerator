@@ -2,7 +2,7 @@
 # Use after Program Device has loaded accel_axi_112.bit.
 #
 # In XSCT:
-#   source C:/Transformer/gzy_gemm_accel/scripts/xsct_run_ip_reg_test.tcl
+#   source C:/Transformer/gzy_gemm_accel/scripts/xsct/xsct_run_ip_reg_test.tcl
 
 set psinit_file "C:/Transformer/gzy_gemm_accel/vitis_ws/accel_axi_112_ip_reg_test/_ide/psinit/ps7_init.tcl"
 set elf_file    "C:/Transformer/gzy_gemm_accel/vitis_ws/accel_axi_112_ip_reg_test/Debug/accel_axi_112_ip_reg_test.elf"

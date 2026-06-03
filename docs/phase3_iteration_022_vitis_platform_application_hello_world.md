@@ -751,13 +751,13 @@ Info: ARM Cortex-A9 MPCore #0 Running
 为了避免 XSCT 里一行一行手敲，我补了一个脚本：
 
 ```text
-C:/Transformer/gzy_gemm_accel/scripts/xsct_run_ip_reg_test.tcl
+C:/Transformer/gzy_gemm_accel/scripts/xsct/xsct_run_ip_reg_test.tcl
 ```
 
 以后在 XSCT 里可以只输入：
 
 ```tcl
-source C:/Transformer/gzy_gemm_accel/scripts/xsct_run_ip_reg_test.tcl
+source C:/Transformer/gzy_gemm_accel/scripts/xsct/xsct_run_ip_reg_test.tcl
 ```
 
 它会自动执行第二层需要的 `connect -> targets -> stop -> ps7_init -> dow -> con`。这个方式比把很多命令用分号拼成一行更清楚，也更不容易输错路径。

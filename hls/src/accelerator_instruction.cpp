@@ -28,7 +28,10 @@ int execute_instruction_stream(
 
 instr_loop:
     for (int pc = 0; pc < ACCEL_MAX_INSTR; pc++) {
-        if (pc < instr_num && !done) {
+        if (pc < instr_num && !done) {//instr_mem类型是accel_instr_word_t，即无符号64bit
+            //instr_mem本身是由AXILite直接得到的（PS写入）
+            //instr_mem是地址放在DDR，用解码指令硬件去读，得到具体指令如gemm或者end即变量instr。
+
             decoded_instr_t instr = decode_instruction(instr_mem[pc]);
 
             if (instr.opcode == ACCEL_OP_END) {

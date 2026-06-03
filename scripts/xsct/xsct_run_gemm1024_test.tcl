@@ -1,11 +1,12 @@
-# XSCT script for layer 3: PS-PL-DDR GEMM sanity test.
-# Use after Program Device has loaded accel_axi_112.bit.
+# XSCT script for the 1024-capable PS-PL-DDR GEMM board test.
+# Build accel_axi_1024_gemm_test before running this script.
+# Use after Program Device has loaded the 1024-capable accelerator bitstream.
 #
 # In XSCT:
-#   source C:/Transformer/gzy_gemm_accel/scripts/xsct_run_gemm_test.tcl
+#   source C:/Transformer/gzy_gemm_accel/scripts/xsct/xsct_run_gemm1024_test.tcl
 
-set psinit_file "C:/Transformer/gzy_gemm_accel/vitis_ws/accel_axi_112_gemm_test/_ide/psinit/ps7_init.tcl"
-set elf_file    "C:/Transformer/gzy_gemm_accel/vitis_ws/accel_axi_112_gemm_test/Debug/accel_axi_112_gemm_test.elf"
+set psinit_file "C:/Transformer/gzy_gemm_accel/vitis_ws/accel_axi_1024_gemm_test/_ide/psinit/ps7_init.tcl"
+set elf_file    "C:/Transformer/gzy_gemm_accel/vitis_ws/accel_axi_1024_gemm_test/Debug/accel_axi_1024_gemm_test.elf"
 
 proc stop_a9_or_continue {} {
     set rc [catch {stop} msg]
@@ -36,10 +37,10 @@ source $psinit_file
 ps7_init
 ps7_post_config
 
-puts "== download GEMM test ELF =="
+puts "== download GEMM 1024-capable test ELF =="
 dow $elf_file
 
-puts "== run GEMM test application =="
+puts "== run GEMM 1024-capable test application =="
 configparams force-mem-access 0
 con
 

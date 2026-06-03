@@ -51,3 +51,14 @@ reports/**/figures/
 
 # Local blog drafts / publishable notes kept outside project history.
 docs/blog_*.md
+
+# Local one-off XSCT experiments. Keep official board scripts under
+# scripts/xsct/xsct_run_*.tcl and scripts/xsct/xsct_repeat_*.tcl tracked.
+scripts/xsct/local_*.tcl
+scripts/xsct/tmp_*.tcl
+scripts/xsct/scratch_*.tcl
+scripts/xsct/debug_*.tcl
+scripts/xsct/*_local.tcl
+scripts/xsct/*_tmp.tcl
+scripts/xsct/*_scratch.tcl
+scripts/xsct/*_debug.tcl

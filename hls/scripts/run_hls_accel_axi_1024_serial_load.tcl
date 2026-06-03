@@ -1,6 +1,11 @@
-# Board-facing AXI bring-up top:
-#   one AXI-Lite control bundle + one AXI master DDR bundle.
-#   Fixed first-test shape: 112 x 112 x 112, TILE=14, BLOCK=112.
+# Board-facing AXI top for the larger GEMM validation.
+# This variant disables combined A/B block loading so HLS uses serial
+# load_a_block() + load_b_block() instead of load_ab_block().
+#   MAX/depth = 1024, TILE=14, BLOCK=112.
+#   GZY_ACCEL_FULL_ONLY stays 0, so boundary blocks such as 1024 are supported.
+#
+# C-sim keeps BENCH at 112 to avoid a very slow 1024^3 software simulation.
+# The generated hardware still uses MAX_N/K/M=1024 and m_axi depth=1024^2.
 
 set script_dir [file normalize [file dirname [info script]]]
 set root_dir   [file normalize [file join $script_dir "../.."]]
@@ -11,8 +16,8 @@ set proj_parent [file join $root_dir "vitis_hls_project"]
 file mkdir $proj_parent
 cd $proj_parent
 
-set project_name "accel_axi_o1_112"
-set cflags [format "-I%s -I%s -DGZY_GEMM_TILE=14 -DGZY_GEMM_BLOCK_M=14 -DGZY_ACCEL_BLOCK_N=112 -DGZY_ACCEL_BLOCK_K=112 -DGZY_ACCEL_BLOCK_M=112 -DGZY_ACCEL_LOAD_AB_PARALLEL=1 -DGZY_ACCEL_LOCAL_ROW_UNROLL=1 -DGZY_ACCEL_LOCAL_AB_PARALLEL=0 -DGZY_ACCEL_LOCAL_DOUBLE_BUFFER=0 -DGZY_ACCEL_DATAFLOW_BLOCK_OVERLAP=0 -DGZY_ACCEL_FULL_BLOCK_FAST=0 -DGZY_ACCEL_FULL_ONLY=0 -DGZY_ACCEL_MAX_N=112 -DGZY_ACCEL_MAX_K=112 -DGZY_ACCEL_MAX_M=112 -DGZY_ACCEL_BENCH_N=112 -DGZY_ACCEL_BENCH_K=112 -DGZY_ACCEL_BENCH_M=112 -DGZY_ACCEL_MAX_INSTR=4" \
+set project_name "accel_axi_o1_1024_serial_load"
+set cflags [format "-I%s -I%s -DGZY_GEMM_TILE=14 -DGZY_GEMM_BLOCK_M=14 -DGZY_ACCEL_BLOCK_N=112 -DGZY_ACCEL_BLOCK_K=112 -DGZY_ACCEL_BLOCK_M=112 -DGZY_ACCEL_LOAD_AB_PARALLEL=0 -DGZY_ACCEL_LOCAL_ROW_UNROLL=1 -DGZY_ACCEL_LOCAL_AB_PARALLEL=0 -DGZY_ACCEL_LOCAL_DOUBLE_BUFFER=0 -DGZY_ACCEL_DATAFLOW_BLOCK_OVERLAP=0 -DGZY_ACCEL_FULL_BLOCK_FAST=0 -DGZY_ACCEL_FULL_ONLY=0 -DGZY_ACCEL_MAX_N=1024 -DGZY_ACCEL_MAX_K=1024 -DGZY_ACCEL_MAX_M=1024 -DGZY_ACCEL_BENCH_N=112 -DGZY_ACCEL_BENCH_K=112 -DGZY_ACCEL_BENCH_M=112 -DGZY_ACCEL_MAX_INSTR=4" \
     $src_dir $tb_dir]
 
 open_project -reset $project_name

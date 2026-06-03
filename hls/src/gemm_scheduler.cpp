@@ -34,8 +34,16 @@
 #define GZY_ACCEL_DATAFLOW_BLOCK_OVERLAP 0
 #endif
 
+#ifndef GZY_ACCEL_COMPUTE_PADDED_INPUTS
+#define GZY_ACCEL_COMPUTE_PADDED_INPUTS 0
+#endif
+
+#ifndef GZY_ACCEL_EXPLICIT_BANKS
+#define GZY_ACCEL_EXPLICIT_BANKS 0
+#endif
+
 #ifndef GZY_ACCEL_FULL_ONLY
-#define GZY_ACCEL_FULL_ONLY 0
+#define GZY_ACCEL_FULL_ONLY 0//0则考虑边界，默认有边界判断电路等；1则不考虑边界，综合出来的电路更简单更快，但只能处理NKM都是block size整数倍的情况。
 #endif
 
 
@@ -63,11 +71,49 @@ else:
 #endif
 #endif
 
+#if GZY_ACCEL_COMPUTE_PADDED_INPUTS
+#if (GZY_ACCEL_BLOCK_N % GZY_GEMM_TILE) != 0
+#error "GZY_ACCEL_COMPUTE_PADDED_INPUTS requires BLOCK_N to be a multiple of TILE"
+#endif
+#if (GZY_ACCEL_BLOCK_K % GZY_GEMM_TILE) != 0
+#error "GZY_ACCEL_COMPUTE_PADDED_INPUTS requires BLOCK_K to be a multiple of TILE"
+#endif
+#if (GZY_ACCEL_BLOCK_M % GZY_GEMM_TILE) != 0
+#error "GZY_ACCEL_COMPUTE_PADDED_INPUTS requires BLOCK_M to be a multiple of TILE"
+#endif
+#endif
+
+#if GZY_ACCEL_EXPLICIT_BANKS
+#if !GZY_ACCEL_COMPUTE_PADDED_INPUTS
+#error "GZY_ACCEL_EXPLICIT_BANKS requires GZY_ACCEL_COMPUTE_PADDED_INPUTS"
+#endif
+#if GZY_ACCEL_FULL_ONLY
+#error "GZY_ACCEL_EXPLICIT_BANKS is only implemented for the generic scheduler path"
+#endif
+#if GZY_ACCEL_FULL_BLOCK_FAST
+#error "GZY_ACCEL_EXPLICIT_BANKS is only implemented with FULL_BLOCK_FAST=0"
+#endif
+#if GZY_ACCEL_LOCAL_DOUBLE_BUFFER
+#error "GZY_ACCEL_EXPLICIT_BANKS is only implemented with LOCAL_DOUBLE_BUFFER=0"
+#endif
+#if GZY_ACCEL_LOCAL_AB_PARALLEL
+#error "GZY_ACCEL_EXPLICIT_BANKS is only implemented with LOCAL_AB_PARALLEL=0"
+#endif
+#if GZY_ACCEL_LOCAL_AB_DIRECT
+#error "GZY_ACCEL_EXPLICIT_BANKS is only implemented with LOCAL_AB_DIRECT=0"
+#endif
+#if !GZY_ACCEL_LOAD_AB_PARALLEL
+#error "GZY_ACCEL_EXPLICIT_BANKS is only implemented with LOAD_AB_PARALLEL=1"
+#endif
+#endif
+
 static const int ACCEL_LOCAL_ROW_UNROLL = GZY_ACCEL_LOCAL_ROW_UNROLL;
 static const int ACCEL_LOAD_AB_COLS =
     (ACCEL_BLOCK_N > ACCEL_BLOCK_M) ? ACCEL_BLOCK_N : ACCEL_BLOCK_M;
 static const int ACCEL_BLOCK_K_TILE_COUNT =
     (ACCEL_BLOCK_K + GEMM_TILE - 1) / GEMM_TILE;
+static const int ACCEL_BLOCK_K_GROUPS = ACCEL_BLOCK_K / GEMM_TILE;
+static const int ACCEL_BLOCK_M_GROUPS = ACCEL_BLOCK_M / GEMM_TILE;
 
 static int min_int(int a, int b) {
 #pragma HLS INLINE
@@ -249,6 +295,60 @@ load_ab_full_k:
     }
 #endif
 }
+
+#if GZY_ACCEL_EXPLICIT_BANKS
+static void load_ab_block_banked(
+    gemm_data_t A_mem[ACCEL_A_ELEMS],
+    gemm_data_t B_mem[ACCEL_B_ELEMS],
+    gemm_data_t A_bank[GEMM_TILE][ACCEL_BLOCK_N][ACCEL_BLOCK_K_GROUPS],
+    gemm_data_t B_bank[GEMM_TILE][ACCEL_BLOCK_K][ACCEL_BLOCK_M_GROUPS],
+    int N,
+    int K,
+    int M,
+    int n0,
+    int k0,
+    int m0,
+    int a_base,
+    int b_base,
+    int current_N,
+    int current_K,
+    int current_M
+) {
+#pragma HLS INLINE off
+#pragma HLS ARRAY_PARTITION variable=A_bank complete dim=1
+#pragma HLS ARRAY_PARTITION variable=B_bank complete dim=1
+load_ab_bank_kg:
+    for (int kg = 0; kg < ACCEL_BLOCK_K_GROUPS; kg++) {
+    load_ab_bank_kb:
+        for (int kb = 0; kb < GEMM_TILE; kb++) {
+            const int k = kg * GEMM_TILE + kb;
+        load_ab_bank_x:
+            for (int x = 0; x < ACCEL_LOAD_AB_COLS; x++) {
+#pragma HLS PIPELINE II=1
+                if (x < ACCEL_BLOCK_N) {
+                    if (x < current_N && k < current_K) {
+                        A_bank[kb][x][kg] =
+                            A_mem[a_base + (n0 + x) * K + (k0 + k)];
+                    } else {
+                        A_bank[kb][x][kg] = 0;
+                    }
+                }
+
+                if (x < ACCEL_BLOCK_M) {
+                    const int jb = x % GEMM_TILE;
+                    const int jg = x / GEMM_TILE;
+                    if (k < current_K && x < current_M) {
+                        B_bank[jb][k][jg] =
+                            B_mem[b_base + (k0 + k) * M + (m0 + x)];
+                    } else {
+                        B_bank[jb][k][jg] = 0;
+                    }
+                }
+            }
+        }
+    }
+}
+#endif
 
 static void load_local_ab_tile(
     gemm_data_t A_buf[ACCEL_BLOCK_N][ACCEL_BLOCK_K],
@@ -654,6 +754,11 @@ compute_tile_i:
 #pragma HLS UNROLL
                         int bi = ti + ii;
                         int bj = tj + jj;
+#if GZY_ACCEL_COMPUTE_PADDED_INPUTS
+                        if (ii < GEMM_TILE) {
+                            localC[ii][jj] = reset_c ? (gemm_acc_t)0 : C_buf[bi][bj];
+                        }
+#else
                         if (ii >= GEMM_TILE || reset_c) {
                             if (ii < GEMM_TILE) {
                                 localC[ii][jj] = 0;
@@ -663,6 +768,7 @@ compute_tile_i:
                         } else {
                             localC[ii][jj] = 0;
                         }
+#endif
                     }
                 }
             }
@@ -836,11 +942,17 @@ compute_tile_i:
 #pragma HLS UNROLL
                             int bi = ti + ii;
                             int bk = tk + kk;
+#if GZY_ACCEL_COMPUTE_PADDED_INPUTS
+                            if (ii < GEMM_TILE) {
+                                localA[ii][kk] = A_buf[bi][bk];
+                            }
+#else
                             if (ii < GEMM_TILE && bi < current_N && bk < current_K) {
                                 localA[ii][kk] = A_buf[bi][bk];
                             } else if (ii < GEMM_TILE) {
                                 localA[ii][kk] = 0;
                             }
+#endif
                         }
                     }
                 }
@@ -857,11 +969,17 @@ compute_tile_i:
 #pragma HLS UNROLL
                             int bk = tk + kk;
                             int bj = tj + jj;
+#if GZY_ACCEL_COMPUTE_PADDED_INPUTS
+                            if (kk < GEMM_TILE) {
+                                localB[kk][jj] = B_buf[bk][bj];
+                            }
+#else
                             if (kk < GEMM_TILE && bk < current_K && bj < current_M) {
                                 localB[kk][jj] = B_buf[bk][bj];
                             } else if (kk < GEMM_TILE) {
                                 localB[kk][jj] = 0;
                             }
+#endif
                         }
                     }
                 }
@@ -883,8 +1001,116 @@ compute_tile_i:
 #pragma HLS UNROLL
                         int bi = ti + ii;
                         int bj = tj + jj;
+#if GZY_ACCEL_COMPUTE_PADDED_INPUTS
+                        if (ii < GEMM_TILE) {
+                            C_buf[bi][bj] = localC[ii][jj];
+                        }
+#else
                         if (ii < GEMM_TILE && bi < current_N && bj < current_M) {
                             C_buf[bi][bj] = localC[ii][jj];
+                        }
+#endif
+                    }
+                }
+            }
+        }
+    }
+}
+
+#if GZY_ACCEL_EXPLICIT_BANKS
+static void compute_block_banked(
+    gemm_data_t A_bank[GEMM_TILE][ACCEL_BLOCK_N][ACCEL_BLOCK_K_GROUPS],
+    gemm_data_t B_bank[GEMM_TILE][ACCEL_BLOCK_K][ACCEL_BLOCK_M_GROUPS],
+    gemm_acc_t C_bank[GEMM_TILE][ACCEL_BLOCK_N][ACCEL_BLOCK_M_GROUPS],
+    bool reset_c
+) {
+#pragma HLS INLINE off
+#pragma HLS ARRAY_PARTITION variable=A_bank complete dim=1
+#pragma HLS ARRAY_PARTITION variable=B_bank complete dim=1
+#pragma HLS ARRAY_PARTITION variable=C_bank complete dim=1
+compute_banked_tile_i:
+    for (int ti = 0; ti < ACCEL_BLOCK_N; ti += GEMM_TILE) {
+    compute_banked_tile_j:
+        for (int tj = 0; tj < ACCEL_BLOCK_M; tj += GEMM_TILE) {
+            const int jg = tj / GEMM_TILE;
+            gemm_acc_t localC[GEMM_TILE][GEMM_TILE];
+#pragma HLS ARRAY_PARTITION variable=localC complete dim=0
+
+        load_banked_local_c_group:
+            for (int ii0 = 0; ii0 < GEMM_TILE; ii0 += ACCEL_LOCAL_ROW_UNROLL) {
+#pragma HLS PIPELINE II=1
+            load_banked_local_c_u:
+                for (int u = 0; u < ACCEL_LOCAL_ROW_UNROLL; u++) {
+#pragma HLS UNROLL
+                    const int ii = ii0 + u;
+                load_banked_local_c_j:
+                    for (int jj = 0; jj < GEMM_TILE; jj++) {
+#pragma HLS UNROLL
+                        if (ii < GEMM_TILE) {
+                            localC[ii][jj] =
+                                reset_c ? (gemm_acc_t)0 : C_bank[jj][ti + ii][jg];
+                        }
+                    }
+                }
+            }
+
+        compute_banked_tile_k:
+            for (int tk = 0; tk < ACCEL_BLOCK_K; tk += GEMM_TILE) {
+                const int kg = tk / GEMM_TILE;
+                gemm_data_t localA[GEMM_TILE][GEMM_TILE];
+                gemm_data_t localB[GEMM_TILE][GEMM_TILE];
+#pragma HLS ARRAY_PARTITION variable=localA complete dim=0
+#pragma HLS ARRAY_PARTITION variable=localB complete dim=0
+
+            load_banked_local_a_group:
+                for (int ii0 = 0; ii0 < GEMM_TILE; ii0 += ACCEL_LOCAL_ROW_UNROLL) {
+#pragma HLS PIPELINE II=1
+                load_banked_local_a_u:
+                    for (int u = 0; u < ACCEL_LOCAL_ROW_UNROLL; u++) {
+#pragma HLS UNROLL
+                        const int ii = ii0 + u;
+                    load_banked_local_a_k:
+                        for (int kk = 0; kk < GEMM_TILE; kk++) {
+#pragma HLS UNROLL
+                            if (ii < GEMM_TILE) {
+                                localA[ii][kk] = A_bank[kk][ti + ii][kg];
+                            }
+                        }
+                    }
+                }
+
+            load_banked_local_b_group:
+                for (int kk0 = 0; kk0 < GEMM_TILE; kk0 += ACCEL_LOCAL_ROW_UNROLL) {
+#pragma HLS PIPELINE II=1
+                load_banked_local_b_u:
+                    for (int u = 0; u < ACCEL_LOCAL_ROW_UNROLL; u++) {
+#pragma HLS UNROLL
+                        const int kk = kk0 + u;
+                    load_banked_local_b_j:
+                        for (int jj = 0; jj < GEMM_TILE; jj++) {
+#pragma HLS UNROLL
+                            if (kk < GEMM_TILE) {
+                                localB[kk][jj] = B_bank[jj][tk + kk][jg];
+                            }
+                        }
+                    }
+                }
+
+                gemm_core_mac(localA, localB, localC);
+            }
+
+        store_banked_local_c_group:
+            for (int ii0 = 0; ii0 < GEMM_TILE; ii0 += ACCEL_LOCAL_ROW_UNROLL) {
+#pragma HLS PIPELINE II=1
+            store_banked_local_c_u:
+                for (int u = 0; u < ACCEL_LOCAL_ROW_UNROLL; u++) {
+#pragma HLS UNROLL
+                    const int ii = ii0 + u;
+                store_banked_local_c_j:
+                    for (int jj = 0; jj < GEMM_TILE; jj++) {
+#pragma HLS UNROLL
+                        if (ii < GEMM_TILE) {
+                            C_bank[jj][ti + ii][jg] = localC[ii][jj];
                         }
                     }
                 }
@@ -892,6 +1118,7 @@ compute_tile_i:
         }
     }
 }
+#endif
 
 static void store_c_block_full(
     gemm_acc_t C_mem[ACCEL_C_ELEMS],
@@ -937,6 +1164,37 @@ store_c_i:
     }
 }
 
+#if GZY_ACCEL_EXPLICIT_BANKS
+static void store_c_block_banked(
+    gemm_acc_t C_mem[ACCEL_C_ELEMS],
+    gemm_acc_t C_bank[GEMM_TILE][ACCEL_BLOCK_N][ACCEL_BLOCK_M_GROUPS],
+    int N,
+    int M,
+    int n0,
+    int m0,
+    int c_base,
+    int current_N,
+    int current_M
+) {
+#pragma HLS INLINE off
+#pragma HLS ARRAY_PARTITION variable=C_bank complete dim=1
+store_c_bank_i:
+    for (int i = 0; i < ACCEL_BLOCK_N; i++) {
+    store_c_bank_jg:
+        for (int jg = 0; jg < ACCEL_BLOCK_M_GROUPS; jg++) {
+        store_c_bank_jb:
+            for (int jb = 0; jb < GEMM_TILE; jb++) {
+#pragma HLS PIPELINE II=1
+                const int j = jg * GEMM_TILE + jb;
+                if (i < current_N && j < current_M) {
+                    C_mem[c_base + (n0 + i) * M + (m0 + j)] = C_bank[jb][i][jg];
+                }
+            }
+        }
+    }
+}
+#endif
+
 void gemm_scheduler(
     gemm_data_t A_mem[ACCEL_A_ELEMS],
     gemm_data_t B_mem[ACCEL_B_ELEMS],
@@ -949,6 +1207,17 @@ void gemm_scheduler(
     int c_base
 ) {
 #pragma HLS INLINE off
+#if GZY_ACCEL_EXPLICIT_BANKS
+    static gemm_data_t A_bank[GEMM_TILE][ACCEL_BLOCK_N][ACCEL_BLOCK_K_GROUPS];
+    static gemm_data_t B_bank[GEMM_TILE][ACCEL_BLOCK_K][ACCEL_BLOCK_M_GROUPS];
+    static gemm_acc_t C_bank[GEMM_TILE][ACCEL_BLOCK_N][ACCEL_BLOCK_M_GROUPS];
+#pragma HLS BIND_STORAGE variable=A_bank type=ram_2p impl=bram
+#pragma HLS BIND_STORAGE variable=B_bank type=ram_2p impl=bram
+#pragma HLS BIND_STORAGE variable=C_bank type=ram_2p impl=bram
+#pragma HLS ARRAY_PARTITION variable=A_bank complete dim=1
+#pragma HLS ARRAY_PARTITION variable=B_bank complete dim=1
+#pragma HLS ARRAY_PARTITION variable=C_bank complete dim=1
+#else
     static gemm_data_t A_buf[ACCEL_BLOCK_N][ACCEL_BLOCK_K];
     static gemm_data_t B_buf[ACCEL_BLOCK_K][ACCEL_BLOCK_M];
     static gemm_acc_t C_buf[ACCEL_BLOCK_N][ACCEL_BLOCK_M];
@@ -962,6 +1231,7 @@ void gemm_scheduler(
 #pragma HLS ARRAY_PARTITION variable=A_buf cyclic factor=GZY_ACCEL_LOCAL_ROW_UNROLL dim=1
 #pragma HLS ARRAY_PARTITION variable=B_buf cyclic factor=GZY_ACCEL_LOCAL_ROW_UNROLL dim=1
 #pragma HLS ARRAY_PARTITION variable=C_buf cyclic factor=GZY_ACCEL_LOCAL_ROW_UNROLL dim=1
+#endif
 #endif
 
 block_n_loop:
@@ -1008,6 +1278,26 @@ block_n_loop:
                 const bool reset_c = (k0 == 0);
                 const bool full_nmk = full_nm && (current_K == ACCEL_BLOCK_K);
 
+#if GZY_ACCEL_EXPLICIT_BANKS
+                load_ab_block_banked(
+                    A_mem,
+                    B_mem,
+                    A_bank,
+                    B_bank,
+                    N,
+                    K,
+                    M,
+                    n0,
+                    k0,
+                    m0,
+                    a_base,
+                    b_base,
+                    current_N,
+                    current_K,
+                    current_M
+                );
+                compute_block_banked(A_bank, B_bank, C_bank, reset_c);
+#else
 #if GZY_ACCEL_FULL_BLOCK_FAST
                 if (full_nmk) {
 #if GZY_ACCEL_LOAD_AB_PARALLEL
@@ -1058,8 +1348,12 @@ block_n_loop:
 #if GZY_ACCEL_FULL_BLOCK_FAST
                 }
 #endif
+#endif
             }
 
+#if GZY_ACCEL_EXPLICIT_BANKS
+            store_c_block_banked(C_mem, C_bank, N, M, n0, m0, c_base, current_N, current_M);
+#else
 #if GZY_ACCEL_FULL_BLOCK_FAST
             if (full_nm) {
                 store_c_block_full(C_mem, C_buf, N, M, n0, m0, c_base);
@@ -1068,6 +1362,7 @@ block_n_loop:
             }
 #else
             store_c_block(C_mem, C_buf, N, M, n0, m0, c_base, current_N, current_M);
+#endif
 #endif
 #endif
         }
