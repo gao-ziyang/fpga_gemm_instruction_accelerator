@@ -10,4 +10,8 @@ Current snapshots:
 accel_axi_112_gemm_test/helloworld.c
   PS-PL-DDR GEMM sanity test for accelerator_top_axi.
   The current checked-in version uses N=112, K=112, M=112.
+
+accel_axi_1024_gemm_test/helloworld.c
+  1024-capable PS-PL-DDR GEMM sanity test.
+  It uses large DDR offsets and runs 1008 full-block plus 1024 boundary-block cases.
 ```
