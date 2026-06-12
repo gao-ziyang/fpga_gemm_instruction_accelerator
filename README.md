@@ -86,7 +86,7 @@ hls/src/accelerator_top_axi.cpp
 当前最新大矩阵 IP 对应脚本：
 
 ```text
-hls/scripts/run_hls_accel_axi_1024_explicit_banks.tcl
+hls/scripts/run_gemmscheduleronly_baseline2_tile14_axi1024_explicit_banks.tcl
 ```
 
 关键宏：
@@ -108,6 +108,18 @@ GZY_ACCEL_FULL_BLOCK_FAST = 0
 ```
 
 注意：当前不是 `FULL_ONLY` 版本。`gemm_scheduler` 中仍然有 `current_N/current_K/current_M` 边界判断。也就是说，它不是“无边界判断，只能跑整块”的代码。
+
+## 当前 canonical HLS baselines
+
+为了避免旧实验工程太多，当前保留三条主线命名：
+
+| 角色 | Tcl | Vitis HLS 工程 | 用途 |
+| --- | --- | --- | --- |
+| GEMM scheduler-only baseline | `hls/scripts/run_gemmscheduleronly_baseline_o1_tile14_128.tcl` | `vitis_hls_project/gemmscheduleronly_baseline_o1_tile14_128` | 早期 O1，`TILE=14`，128 cosim 对照 |
+| GEMM board-facing baseline2 | `hls/scripts/run_gemmscheduleronly_baseline2_tile14_axi1024_explicit_banks.tcl` | `vitis_hls_project/gemmscheduleronly_baseline2_tile14_axi1024_explicit_banks` | 已上板的 1024-capable GEMM AXI IP |
+| All-accelerator baseline | `hls/scripts/run_allaccelerator_baseline_tile8_stage5.tcl` | `vitis_hls_project/allaccelerator_baseline_tile8_stage5` | `TILE=8`，共享 GEMM 的 Conv/QKV/Attention descriptor baseline |
+
+`hls/src` 现在只保留当前三条主线需要的源码：GEMM core/scheduler、AXI top、instruction decode/dispatch 和公共类型定义。旧的 standalone `conv_top/qkv_top/attention_top/layer_gemm` 验证入口已经清掉，历史 Tcl 仍留在 `hls/scripts` 中用于追溯。
 
 Vivado 自动化脚本：
 
@@ -214,8 +226,7 @@ source C:/Transformer/gzy_gemm_accel/scripts/xsct/xsct_run_gemm1024_test.tcl
 如果 XSCT `targets` 中出现 DAP/AP transaction error，优先按 JTAG/DAP/PS debug 状态问题处理，不要先怀疑 C 代码或 linker script。更详细记录见：
 
 ```text
-docs/phase3_iteration_022_vitis_platform_application_hello_world.md
-docs/phase3_iteration_023_ps_pl_ddr_gemm_sanity.md
+docs/debug_issue_notes/tool_flow_notes.md
 ```
 
 ## 关于 1024 / 1008 / 后续更大尺寸
@@ -279,23 +290,19 @@ C     = 0x04000000
 
 现在不建议一上来就为了 `2048/2016` 继续放大矩阵。更稳的是先把 Conv/Attention 接到已经跑通的 GEMM/instruction/AXI 框架里，功能边界先清楚，优化才不会把调试问题搅在一起。
 
-## 迭代日志
+## 文档索引
 
-重要日志：
+`docs/` 已经从逐次流水账整理成阶段汇总和少数问题专题：
 
 ```text
-docs/phase3_iteration_020_board_bringup_plan.md
-docs/phase3_iteration_021_vivado_bd_from_hls_ip.md
-docs/phase3_iteration_022_vitis_platform_application_hello_world.md
-docs/phase3_iteration_023_ps_pl_ddr_gemm_sanity.md
-docs/phase3_iteration_024_compute_boundary_hoist_padding_plan.md
-docs/phase3_iteration_025_hls_resource_model_explicit_banking_plan.md
-docs/phase3_iteration_026_axi_1024_board_validation.md
-docs/debug_issue_notes/hls_driver_makefile_echo_windows_note.md
-docs/debug_issue_notes/vivado_2020_ip_packager_revision_note.md
+docs/README.md
+docs/phase1_summary.md
+docs/phase2_summary.md
+docs/phase3_summary.md
+docs/debug_issue_notes/gemm_latency_throughput_summary.md
 docs/debug_issue_notes/latency_model_formula_explanation.md
-docs/debug_issue_notes/hardware_ascii_diagram_explanation.md
-docs/debug_issue_notes/phase2_phase3_teacher_talking_points.md
+docs/debug_issue_notes/operator_descriptor_resource_timing_optimization_notes.md
+docs/debug_issue_notes/tool_flow_notes.md
 ```
 
-调试问题、工具问题、说明类图片和非纯日志文档统一放在 `docs/debug_issue_notes/`。Phase 1/2 的历史功能、优化和反例仍保留在 `docs/phase1_*`、`docs/phase2_*` 中。README 只记录当前主线和下一步。
+调试问题、工具问题、说明类图片和非纯日志文档统一放在 `docs/debug_issue_notes/`。README 只记录当前主线和下一步，历史细节优先查 `docs/README.md`。

@@ -62,3 +62,5 @@ scripts/xsct/*_local.tcl
 scripts/xsct/*_tmp.tcl
 scripts/xsct/*_scratch.tcl
 scripts/xsct/*_debug.tcl
+#不上传自己的调试问题笔记
+docs/debug_issue_notes/

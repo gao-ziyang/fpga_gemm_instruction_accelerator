@@ -10,13 +10,13 @@ set project_name "accel_axi_1024_explicit_banks"
 set project_dir  [file join $root_dir "vivado_board" $project_name]
 set project_xpr  [file join $project_dir "${project_name}.xpr"]
 
-set ip_repo_dir [file join $root_dir "vitis_hls_project" "accel_axi_o1_1024_explicit_banks" "solution1" "impl" "ip"]
+set ip_repo_dir [file join $root_dir "vitis_hls_project" "gemmscheduleronly_baseline2_tile14_axi1024_explicit_banks" "solution1" "impl" "ip"]
 set component_xml [file join $ip_repo_dir "component.xml"]
 
 set bd_tcl [file join $root_dir "vivado_board" "accel_axi_112" "accel_axi_112.gen" "sources_1" "bd" "design_1" "hw_handoff" "design_1_bd.tcl"]
 
 if {![file exists $component_xml]} {
-    error "Missing HLS IP component.xml: $component_xml. Run hls/scripts/run_hls_accel_axi_1024_explicit_banks.tcl first."
+    error "Missing HLS IP component.xml: $component_xml. Run hls/scripts/run_gemmscheduleronly_baseline2_tile14_axi1024_explicit_banks.tcl first."
 }
 
 if {![file exists $bd_tcl]} {
