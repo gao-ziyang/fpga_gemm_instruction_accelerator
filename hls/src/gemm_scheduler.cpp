@@ -49,7 +49,7 @@
 
 //不考虑边界的宏定义，O6ab优化版本。有compute_block和compute_block_full两个函数。
 //但是效果不好，综合出来了两套硬件，且因为我NKM测试比较小所以没发挥出效果。
-/* 
+/*
 if 当前是完整 block:
     走 full path
 else:
@@ -57,6 +57,18 @@ else:
     */
 #ifndef GZY_ACCEL_FULL_BLOCK_FAST
 #define GZY_ACCEL_FULL_BLOCK_FAST 0
+#endif
+
+#ifndef GZY_ACCEL_SHARED_GEMM_INLINE
+#define GZY_ACCEL_SHARED_GEMM_INLINE 0
+#endif
+
+#ifndef GZY_ACCEL_CONV_DIRECT_WEIGHT_LOAD
+#define GZY_ACCEL_CONV_DIRECT_WEIGHT_LOAD 0
+#endif
+
+#if GZY_ACCEL_CONV_DIRECT_WEIGHT_LOAD && GZY_ACCEL_LOAD_AB_PARALLEL
+#error "GZY_ACCEL_CONV_DIRECT_WEIGHT_LOAD currently requires GZY_ACCEL_LOAD_AB_PARALLEL=0"
 #endif
 
 #if GZY_ACCEL_FULL_ONLY
@@ -120,6 +132,22 @@ static int min_int(int a, int b) {
     return (a < b) ? a : b;
 }
 
+static gemm_data_t scheduler_quantize_acc_to_i8(gemm_acc_t value, int shift) {
+#pragma HLS INLINE
+    gemm_acc_t shifted = value;
+    if (shift > 0) {
+        shifted = value >> shift;
+    }
+
+    if (shifted > 127) {
+        return (gemm_data_t)127;
+    }
+    if (shifted < -128) {
+        return (gemm_data_t)-128;
+    }
+    return (gemm_data_t)shifted;
+}
+
 static void load_a_block(
     gemm_data_t A_mem[ACCEL_A_ELEMS],
     gemm_data_t A_buf[ACCEL_BLOCK_N][ACCEL_BLOCK_K],
@@ -165,6 +193,42 @@ load_b_k:
 #pragma HLS PIPELINE II=1
             if (k < current_K && j < current_M) {
                 B_buf[k][j] = B_mem[b_base + (k0 + k) * M + (m0 + j)];
+            } else {
+                B_buf[k][j] = 0;
+            }
+        }
+    }
+}
+
+static void load_b_conv_weight_block(
+    gemm_data_t B_mem[ACCEL_B_ELEMS],
+    gemm_data_t B_buf[ACCEL_BLOCK_K][ACCEL_BLOCK_M],
+    int M,
+    int k0,
+    int m0,
+    int b_base,
+    int current_K,
+    int current_M,
+    int conv_cin,
+    int conv_kh,
+    int conv_kw
+) {
+#pragma HLS INLINE off
+    const int khkw = conv_kh * conv_kw;
+load_b_conv_k:
+    for (int k = 0; k < ACCEL_BLOCK_K; k++) {
+    load_b_conv_j:
+        for (int j = 0; j < ACCEL_BLOCK_M; j++) {
+#pragma HLS PIPELINE II=1
+            if (k < current_K && j < current_M) {
+                const int flat_k = k0 + k;
+                const int ci = flat_k / khkw;
+                const int rem = flat_k - ci * khkw;
+                const int r = rem / conv_kw;
+                const int s = rem - r * conv_kw;
+                const int co = m0 + j;
+                B_buf[k][j] =
+                    B_mem[b_base + ((co * conv_cin + ci) * conv_kh + r) * conv_kw + s];
             } else {
                 B_buf[k][j] = 0;
             }
@@ -1164,6 +1228,104 @@ store_c_i:
     }
 }
 
+static void store_c_block_transpose(
+    gemm_acc_t C_mem[ACCEL_C_ELEMS],
+    gemm_acc_t C_buf[ACCEL_BLOCK_N][ACCEL_BLOCK_M],
+    int N,
+    int n0,
+    int m0,
+    int c_base,
+    int current_N,
+    int current_M
+) {
+#pragma HLS INLINE off
+store_c_t_i:
+    for (int i = 0; i < ACCEL_BLOCK_N; i++) {
+    store_c_t_j:
+        for (int j = 0; j < ACCEL_BLOCK_M; j++) {
+#pragma HLS PIPELINE II=1
+            if (i < current_N && j < current_M) {
+                C_mem[c_base + (m0 + j) * N + (n0 + i)] = C_buf[i][j];
+            }
+        }
+    }
+}
+
+static void store_i8_a_block(
+    gemm_data_t A_mem[ACCEL_A_ELEMS],
+    gemm_acc_t C_buf[ACCEL_BLOCK_N][ACCEL_BLOCK_M],
+    int M,
+    int n0,
+    int m0,
+    int out_base,
+    int shift,
+    int current_N,
+    int current_M
+) {
+#pragma HLS INLINE off
+store_i8_a_i:
+    for (int i = 0; i < ACCEL_BLOCK_N; i++) {
+    store_i8_a_j:
+        for (int j = 0; j < ACCEL_BLOCK_M; j++) {
+#pragma HLS PIPELINE II=1
+            if (i < current_N && j < current_M) {
+                A_mem[out_base + (n0 + i) * M + (m0 + j)] =
+                    scheduler_quantize_acc_to_i8(C_buf[i][j], shift);
+            }
+        }
+    }
+}
+
+static void store_i8_b_block(
+    gemm_data_t B_mem[ACCEL_B_ELEMS],
+    gemm_acc_t C_buf[ACCEL_BLOCK_N][ACCEL_BLOCK_M],
+    int M,
+    int n0,
+    int m0,
+    int out_base,
+    int shift,
+    int current_N,
+    int current_M
+) {
+#pragma HLS INLINE off
+store_i8_b_i:
+    for (int i = 0; i < ACCEL_BLOCK_N; i++) {
+    store_i8_b_j:
+        for (int j = 0; j < ACCEL_BLOCK_M; j++) {
+#pragma HLS PIPELINE II=1
+            if (i < current_N && j < current_M) {
+                B_mem[out_base + (n0 + i) * M + (m0 + j)] =
+                    scheduler_quantize_acc_to_i8(C_buf[i][j], shift);
+            }
+        }
+    }
+}
+
+static void store_i8_b_transpose_block(
+    gemm_data_t B_mem[ACCEL_B_ELEMS],
+    gemm_acc_t C_buf[ACCEL_BLOCK_N][ACCEL_BLOCK_M],
+    int N,
+    int n0,
+    int m0,
+    int out_base,
+    int shift,
+    int current_N,
+    int current_M
+) {
+#pragma HLS INLINE off
+store_i8_bt_i:
+    for (int i = 0; i < ACCEL_BLOCK_N; i++) {
+    store_i8_bt_j:
+        for (int j = 0; j < ACCEL_BLOCK_M; j++) {
+#pragma HLS PIPELINE II=1
+            if (i < current_N && j < current_M) {
+                B_mem[out_base + (m0 + j) * N + (n0 + i)] =
+                    scheduler_quantize_acc_to_i8(C_buf[i][j], shift);
+            }
+        }
+    }
+}
+
 #if GZY_ACCEL_EXPLICIT_BANKS
 static void store_c_block_banked(
     gemm_acc_t C_mem[ACCEL_C_ELEMS],
@@ -1204,9 +1366,20 @@ void gemm_scheduler(
     int M,
     int a_base,
     int b_base,
-    int c_base
+    int c_base,
+    int load_b_mode,
+    int conv_cin,
+    int conv_kh,
+    int conv_kw,
+    int store_mode,
+    int store_i8_base,
+    int store_i8_shift
 ) {
+#if GZY_ACCEL_SHARED_GEMM_INLINE
+#pragma HLS INLINE
+#else
 #pragma HLS INLINE off
+#endif
 #if GZY_ACCEL_EXPLICIT_BANKS
     static gemm_data_t A_bank[GEMM_TILE][ACCEL_BLOCK_N][ACCEL_BLOCK_K_GROUPS];
     static gemm_data_t B_bank[GEMM_TILE][ACCEL_BLOCK_K][ACCEL_BLOCK_M_GROUPS];
@@ -1260,12 +1433,81 @@ block_n_loop:
                 );
 #else
                 load_a_block_full(A_mem, A_buf, N, K, n0, k0, a_base);
+#if GZY_ACCEL_CONV_DIRECT_WEIGHT_LOAD
+                if (load_b_mode == GEMM_LOAD_B_CONV_WEIGHT) {
+                    load_b_conv_weight_block(
+                        B_mem,
+                        B_buf,
+                        M,
+                        k0,
+                        m0,
+                        b_base,
+                        ACCEL_BLOCK_K,
+                        ACCEL_BLOCK_M,
+                        conv_cin,
+                        conv_kh,
+                        conv_kw
+                    );
+                } else {
+                    load_b_block_full(B_mem, B_buf, K, M, k0, m0, b_base);
+                }
+#else
                 load_b_block_full(B_mem, B_buf, K, M, k0, m0, b_base);
+#endif
 #endif
                 compute_block_full(A_buf, B_buf, C_buf, reset_c);
             }
 
-            store_c_block_full(C_mem, C_buf, N, M, n0, m0, c_base);
+            if (store_mode == GEMM_STORE_I8_A) {
+                store_i8_a_block(
+                    A_mem,
+                    C_buf,
+                    M,
+                    n0,
+                    m0,
+                    store_i8_base,
+                    store_i8_shift,
+                    ACCEL_BLOCK_N,
+                    ACCEL_BLOCK_M
+                );
+            } else if (store_mode == GEMM_STORE_I8_B) {
+                store_i8_b_block(
+                    B_mem,
+                    C_buf,
+                    M,
+                    n0,
+                    m0,
+                    store_i8_base,
+                    store_i8_shift,
+                    ACCEL_BLOCK_N,
+                    ACCEL_BLOCK_M
+                );
+            } else if (store_mode == GEMM_STORE_I8_B_TRANSPOSE) {
+                store_i8_b_transpose_block(
+                    B_mem,
+                    C_buf,
+                    N,
+                    n0,
+                    m0,
+                    store_i8_base,
+                    store_i8_shift,
+                    ACCEL_BLOCK_N,
+                    ACCEL_BLOCK_M
+                );
+            } else if (store_mode == GEMM_STORE_ACC_C_TRANSPOSE) {
+                store_c_block_transpose(
+                    C_mem,
+                    C_buf,
+                    N,
+                    n0,
+                    m0,
+                    c_base,
+                    ACCEL_BLOCK_N,
+                    ACCEL_BLOCK_M
+                );
+            } else {
+                store_c_block_full(C_mem, C_buf, N, M, n0, m0, c_base);
+            }
 #else
             const int current_N = min_int(ACCEL_BLOCK_N, N - n0);
             const int current_M = min_int(ACCEL_BLOCK_M, M - m0);
@@ -1342,7 +1584,27 @@ block_n_loop:
                     );
 #else
                     load_a_block(A_mem, A_buf, N, K, n0, k0, a_base, current_N, current_K);
+#if GZY_ACCEL_CONV_DIRECT_WEIGHT_LOAD
+                    if (load_b_mode == GEMM_LOAD_B_CONV_WEIGHT) {
+                        load_b_conv_weight_block(
+                            B_mem,
+                            B_buf,
+                            M,
+                            k0,
+                            m0,
+                            b_base,
+                            current_K,
+                            current_M,
+                            conv_cin,
+                            conv_kh,
+                            conv_kw
+                        );
+                    } else {
+                        load_b_block(B_mem, B_buf, K, M, k0, m0, b_base, current_K, current_M);
+                    }
+#else
                     load_b_block(B_mem, B_buf, K, M, k0, m0, b_base, current_K, current_M);
+#endif
 #endif
                     compute_block(A_buf, B_buf, C_buf, current_N, current_K, current_M, reset_c);
 #if GZY_ACCEL_FULL_BLOCK_FAST
@@ -1354,15 +1616,64 @@ block_n_loop:
 #if GZY_ACCEL_EXPLICIT_BANKS
             store_c_block_banked(C_mem, C_bank, N, M, n0, m0, c_base, current_N, current_M);
 #else
-#if GZY_ACCEL_FULL_BLOCK_FAST
-            if (full_nm) {
-                store_c_block_full(C_mem, C_buf, N, M, n0, m0, c_base);
+            if (store_mode == GEMM_STORE_I8_A) {
+                store_i8_a_block(
+                    A_mem,
+                    C_buf,
+                    M,
+                    n0,
+                    m0,
+                    store_i8_base,
+                    store_i8_shift,
+                    current_N,
+                    current_M
+                );
+            } else if (store_mode == GEMM_STORE_I8_B) {
+                store_i8_b_block(
+                    B_mem,
+                    C_buf,
+                    M,
+                    n0,
+                    m0,
+                    store_i8_base,
+                    store_i8_shift,
+                    current_N,
+                    current_M
+                );
+            } else if (store_mode == GEMM_STORE_I8_B_TRANSPOSE) {
+                store_i8_b_transpose_block(
+                    B_mem,
+                    C_buf,
+                    N,
+                    n0,
+                    m0,
+                    store_i8_base,
+                    store_i8_shift,
+                    current_N,
+                    current_M
+                );
+            } else if (store_mode == GEMM_STORE_ACC_C_TRANSPOSE) {
+                store_c_block_transpose(
+                    C_mem,
+                    C_buf,
+                    N,
+                    n0,
+                    m0,
+                    c_base,
+                    current_N,
+                    current_M
+                );
             } else {
-                store_c_block(C_mem, C_buf, N, M, n0, m0, c_base, current_N, current_M);
-            }
+#if GZY_ACCEL_FULL_BLOCK_FAST
+                if (full_nm) {
+                    store_c_block_full(C_mem, C_buf, N, M, n0, m0, c_base);
+                } else {
+                    store_c_block(C_mem, C_buf, N, M, n0, m0, c_base, current_N, current_M);
+                }
 #else
-            store_c_block(C_mem, C_buf, N, M, n0, m0, c_base, current_N, current_M);
+                store_c_block(C_mem, C_buf, N, M, n0, m0, c_base, current_N, current_M);
 #endif
+            }
 #endif
 #endif
         }

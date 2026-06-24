@@ -12,13 +12,15 @@ set proj_parent [file join $root_dir "vitis_hls_project"]
 
 proc run_one_tile {proj_parent src_dir tb_dir tile block_m} {
     set project_name [format "gemm_bench_tile%d" $tile]
-    set cflags [format "-I%s -DGZY_GEMM_TILE=%d -DGZY_GEMM_BLOCK_M=%d" $src_dir $tile $block_m]
+    set cflags [format "-I%s -DGZY_GEMM_TILE=%d -DGZY_GEMM_BLOCK_M=%d -DGZY_ACCEL_MAX_N=16 -DGZY_ACCEL_MAX_K=96 -DGZY_ACCEL_MAX_M=96 -DGZY_ACCEL_BLOCK_N=16 -DGZY_ACCEL_BLOCK_K=32 -DGZY_ACCEL_BLOCK_M=32 -DGZY_ACCEL_BENCH_N=16 -DGZY_ACCEL_BENCH_K=96 -DGZY_ACCEL_BENCH_M=96" $src_dir $tile $block_m]
 
     cd $proj_parent
     open_project -reset $project_name
     set_top gemm_bench_top
 
     add_files -cflags $cflags [file join $src_dir "gemm_core.cpp"]
+    add_files -cflags $cflags [file join $src_dir "gemm_scheduler.cpp"]
+    add_files -cflags $cflags [file join $src_dir "layer_gemm.cpp"]
     add_files -cflags $cflags [file join $src_dir "gemm_bench_top.cpp"]
     add_files -tb -cflags $cflags [file join $tb_dir "tb_gemm_bench.cpp"]
 

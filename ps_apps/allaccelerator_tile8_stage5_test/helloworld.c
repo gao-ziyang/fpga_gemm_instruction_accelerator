@@ -27,9 +27,10 @@
 #define AP_CTRL_READY 0x08U
 
 #define WAIT_TIMEOUT_US 30000000ULL
+#define PL_FCLK_MHZ 50ULL
 
-#define TB_OP_N       16
-#define TB_OP_D       96
+#define TB_OP_N       64
+#define TB_OP_D       128
 #define TB_OP_Q_SHIFT 5
 #define TB_OP_P_SHIFT 6
 
@@ -45,25 +46,28 @@
 #define TB_CONV_OUT_HW (TB_CONV_OUT_H * TB_CONV_OUT_W)
 
 #define TB_A_X           0
-#define TB_A_Q           2048
-#define TB_A_P           4096
-#define TB_A_CONV_IN     4608
-#define TB_A_CONV_IM2COL 5120
+#define TB_A_Q           (TB_A_X + TB_OP_N * TB_OP_D)
+#define TB_A_P           (TB_A_Q + TB_OP_N * TB_OP_D)
+#define TB_A_CONV_IN     24576
+#define TB_A_CONV_IM2COL 25088
+#define TB_A_REGION_BYTES 32768U
 
 #define TB_B_WQ               0
-#define TB_B_WK               12288
-#define TB_B_WV               24576
-#define TB_B_KT               36864
-#define TB_B_V                40960
-#define TB_B_CONV_W           45056
-#define TB_B_CONV_W_SCRATCH   49152
+#define TB_B_WK               (TB_B_WQ + TB_OP_D * TB_OP_D)
+#define TB_B_WV               (TB_B_WK + TB_OP_D * TB_OP_D)
+#define TB_B_KT               (TB_B_WV + TB_OP_D * TB_OP_D)
+#define TB_B_V                (TB_B_KT + TB_OP_D * TB_OP_N)
+#define TB_B_CONV_W           65536
+#define TB_B_CONV_W_SCRATCH   69632
 #define TB_B_CONV_W_PREPACKED TB_B_CONV_W_SCRATCH
+#define TB_B_REGION_BYTES     131072U
 
 #define TB_C_QKV_SCRATCH  0
-#define TB_C_SCORE        4096
-#define TB_C_OUT          8192
-#define TB_C_CONV_OUT     12288
-#define TB_C_CONV_SCRATCH 16384
+#define TB_C_SCORE        8192
+#define TB_C_OUT          16384
+#define TB_C_CONV_OUT     28672
+#define TB_C_CONV_SCRATCH 32768
+#define TB_C_REGION_ELEMS 65536U
 
 #define INSTR_WORDS_EXPECTED 21
 
@@ -149,6 +153,36 @@ static s8 quantize_i8(s32 value, int shift)
     return (s8)shifted;
 }
 
+static u64 total_mac_count(void)
+{
+    const u64 conv_mac = (u64)TB_CONV_OUT_HW * (u64)TB_CONV_COUT *
+                         (u64)TB_CONV_CIN * (u64)TB_CONV_KH *
+                         (u64)TB_CONV_KW;
+    const u64 qkv_mac = 3ULL * (u64)TB_OP_N * (u64)TB_OP_D * (u64)TB_OP_D;
+    const u64 score_mac = (u64)TB_OP_N * (u64)TB_OP_N * (u64)TB_OP_D;
+    const u64 value_mac = (u64)TB_OP_N * (u64)TB_OP_N * (u64)TB_OP_D;
+
+    return conv_mac + qkv_mac + score_mac + value_mac;
+}
+
+static void print_mac_per_cycle(u64 mac, u64 elapsed_us)
+{
+    const u64 cycles = elapsed_us * PL_FCLK_MHZ;
+    u64 scaled;
+
+    if (cycles == 0ULL) {
+        xil_printf("mac_per_cycle = n/a\r\n");
+        return;
+    }
+
+    scaled = (mac * 100ULL + cycles / 2ULL) / cycles;
+    xil_printf("board_cycles_50mhz = ");
+    print_u64_dec("", cycles);
+    xil_printf("mac_per_cycle_x100 = %d.%02d\r\n",
+               (int)(scaled / 100ULL),
+               (int)(scaled % 100ULL));
+}
+
 static int ceil_log2_positive(s32 value)
 {
     u32 v = (u32)value;
@@ -207,13 +241,13 @@ static void clear_regions(void)
     volatile s32 *c = c_mem();
     int i;
 
-    for (i = 0; i < 8192; i++) {
+    for (i = 0; i < (int)TB_A_REGION_BYTES; i++) {
         a[i] = 0;
     }
-    for (i = 0; i < 65536; i++) {
+    for (i = 0; i < (int)TB_B_REGION_BYTES; i++) {
         b[i] = 0;
     }
-    for (i = 0; i < 32768; i++) {
+    for (i = 0; i < (int)TB_C_REGION_ELEMS; i++) {
         c[i] = 0;
     }
 }
@@ -283,9 +317,9 @@ static void init_inputs(void)
         }
     }
 
-    Xil_DCacheFlushRange(DDR_A_ADDR, 8192U);
-    Xil_DCacheFlushRange(DDR_B_ADDR, 65536U);
-    Xil_DCacheFlushRange(DDR_C_ADDR, 32768U * sizeof(s32));
+    Xil_DCacheFlushRange(DDR_A_ADDR, TB_A_REGION_BYTES);
+    Xil_DCacheFlushRange(DDR_B_ADDR, TB_B_REGION_BYTES);
+    Xil_DCacheFlushRange(DDR_C_ADDR, TB_C_REGION_ELEMS * (u32)sizeof(s32));
 }
 
 static int write_descriptor_stream(void)
@@ -631,6 +665,8 @@ int main(void)
     xil_printf("A addr     = 0x%08x\r\n", DDR_A_ADDR);
     xil_printf("B addr     = 0x%08x\r\n", DDR_B_ADDR);
     xil_printf("C addr     = 0x%08x\r\n", DDR_C_ADDR);
+    xil_printf("Attention max case N=%d D=%d\r\n", TB_OP_N, TB_OP_D);
+    print_u64_dec("total_mac = ", total_mac_count());
 
     init_inputs();
     instr_words = write_descriptor_stream();
@@ -642,10 +678,11 @@ int main(void)
         cleanup_platform();
         return 1;
     }
+    print_mac_per_cycle(total_mac_count(), elapsed_us);
 
-    Xil_DCacheInvalidateRange(DDR_A_ADDR, 8192U);
-    Xil_DCacheInvalidateRange(DDR_B_ADDR, 65536U);
-    Xil_DCacheInvalidateRange(DDR_C_ADDR, 32768U * sizeof(s32));
+    Xil_DCacheInvalidateRange(DDR_A_ADDR, TB_A_REGION_BYTES);
+    Xil_DCacheInvalidateRange(DDR_B_ADDR, TB_B_REGION_BYTES);
+    Xil_DCacheInvalidateRange(DDR_C_ADDR, TB_C_REGION_ELEMS * (u32)sizeof(s32));
 
     conv_errors = check_conv_output();
     attn_errors = check_attention_outputs();

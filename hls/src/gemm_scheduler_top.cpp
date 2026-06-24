@@ -37,6 +37,13 @@ void gemm_scheduler_top(
 #endif
         0,
         0,
+        0,
+        GEMM_LOAD_B_ROW_MAJOR,
+        0,
+        0,
+        0,
+        GEMM_STORE_ACC_C,
+        0,
         0
     );
 }

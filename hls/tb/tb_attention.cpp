@@ -1,6 +1,19 @@
 #include <cstdio>
 
 #include "attention_core.h"
+#include "layer_scheduler_tops.h"
+
+#ifndef GZY_ATTENTION_SCORE_TOP_FN
+#define GZY_ATTENTION_SCORE_TOP_FN attention_score_top
+#endif
+
+#ifndef GZY_ATTENTION_NO_SOFTMAX_TOP_FN
+#define GZY_ATTENTION_NO_SOFTMAX_TOP_FN attention_no_softmax_top
+#endif
+
+#ifndef GZY_ATTENTION_TOP_FN
+#define GZY_ATTENTION_TOP_FN attention_top
+#endif
 
 static gemm_data_t ref_saturate_to_int8(gemm_acc_t x, int shift) {
     gemm_acc_t y = x;
@@ -323,8 +336,8 @@ static int run_attention_case(int N, int D, int offset) {
     reference_row_normalize(Score_ref, P_q, N, p_shift);
     reference_out(P_q, V_q, Attention_ref, N, N, D);
 
-    attention_no_softmax_top(X, Wq, Wk, Wv, NoSoftmax_got, N, D, q_shift, score_shift);
-    attention_top(X, Wq, Wk, Wv, Attention_got, N, D, q_shift, p_shift);
+    GZY_ATTENTION_NO_SOFTMAX_TOP_FN(X, Wq, Wk, Wv, NoSoftmax_got, N, D, q_shift, score_shift);
+    GZY_ATTENTION_TOP_FN(X, Wq, Wk, Wv, Attention_got, N, D, q_shift, p_shift);
 
     int max_abs_error = 0;
     long long checksum = 0;
@@ -348,7 +361,7 @@ static int run_score_case(int N, int D) {
 
     init_direct_qk(Q_q, K_q, N, D);
     reference_score(Q_q, K_q, Score_ref, N, D);
-    attention_score_top(Q_q, K_q, Score_got, N, D);
+    GZY_ATTENTION_SCORE_TOP_FN(Q_q, K_q, Score_got, N, D);
 
     int max_abs_error = 0;
     long long checksum = 0;

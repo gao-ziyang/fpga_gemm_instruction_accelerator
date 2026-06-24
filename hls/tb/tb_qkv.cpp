@@ -1,6 +1,11 @@
 #include <cstdio>
 
+#include "layer_scheduler_tops.h"
 #include "qkv_projection.h"
+
+#ifndef GZY_QKV_TOP_FN
+#define GZY_QKV_TOP_FN qkv_top
+#endif
 
 static gemm_data_t gen_x(int i, int k) {
     return (gemm_data_t)(((i * 31 + k * 17 + 5) % 128) - 64);
@@ -115,7 +120,7 @@ int main() {
         }
     }
 
-    qkv_top(X, Wq, Wk, Wv, Q, K_out, V, N, D);
+    GZY_QKV_TOP_FN(X, Wq, Wk, Wv, Q, K_out, V, N, D);
 
     golden_projection(X, Wq, Q_golden, N, D);
     golden_projection(X, Wk, K_golden, N, D);

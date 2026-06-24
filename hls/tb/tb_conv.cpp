@@ -1,6 +1,11 @@
 #include <cstdio>
 
 #include "conv_top.h"
+#include "layer_scheduler_tops.h"
+
+#ifndef GZY_CONV_TOP_FN
+#define GZY_CONV_TOP_FN conv_top
+#endif
 
 static int input_index(int ci, int h, int w) {
     return ci * CONV_INPUT_C_STRIDE + h * CONV_INPUT_H_STRIDE + w;
@@ -215,7 +220,7 @@ int main() {
     build_weight_matrix(weight, B_ref);
     build_gemm_matrix_reference(A_ref, B_ref, C_ref);
 
-    conv_top(input, weight, output);
+    GZY_CONV_TOP_FN(input, weight, output);
     conv2d_reference(input, weight, expected);
 
     print_input(input);

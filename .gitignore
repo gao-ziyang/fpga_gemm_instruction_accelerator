@@ -64,3 +64,4 @@ scripts/xsct/*_scratch.tcl
 scripts/xsct/*_debug.tcl
 #不上传自己的调试问题笔记
 docs/debug_issue_notes/
+vitis_ws_allaccelerator_tile8_stage5/

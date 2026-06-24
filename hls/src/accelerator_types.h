@@ -30,7 +30,7 @@
 #endif
 
 #ifndef GZY_ACCEL_MAX_INSTR
-#define GZY_ACCEL_MAX_INSTR 16
+#define GZY_ACCEL_MAX_INSTR 64
 #endif
 
 static const int ACCEL_MAX_N = GZY_ACCEL_MAX_N;
@@ -50,7 +50,17 @@ typedef ap_uint<64> accel_instr_word_t;
 
 static const ap_uint<8> ACCEL_OP_END = 0;
 static const ap_uint<8> ACCEL_OP_GEMM = 1;
+static const ap_uint<8> ACCEL_OP_QKV = 2;
+static const ap_uint<8> ACCEL_OP_ATTN_SCORE = 3;
+static const ap_uint<8> ACCEL_OP_CONV_GEMM = 4;
+static const ap_uint<8> ACCEL_OP_CONV2D = 5;
+static const ap_uint<8> ACCEL_OP_QKV_DDR = 6;
+static const ap_uint<8> ACCEL_OP_ATTN_SCORE_DDR = 7;
+static const ap_uint<8> ACCEL_OP_ATTN_NORM = 8;
+static const ap_uint<8> ACCEL_OP_ATTN_VALUE = 9;
 static const int ACCEL_BASE_UNIT = 4096;
+static const int ACCEL_QKV_B_STRIDE = ACCEL_BASE_UNIT * 4;
+static const int ACCEL_QKV_C_STRIDE = ACCEL_BASE_UNIT;
 
 #ifndef GZY_ACCEL_BENCH_N
 #define GZY_ACCEL_BENCH_N 1024
